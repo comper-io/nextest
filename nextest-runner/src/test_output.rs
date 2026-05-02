@@ -34,48 +34,100 @@ pub enum CaptureStrategy {
 
 /// A shared, append-only output buffer used by server wrappers.
 #[derive(Clone, Debug, Default)]
-pub struct ServerWrapperOutputBuffer {
-    inner: Arc<Mutex<Vec<u8>>>,
+pub(crate) struct ServerWrapperOutputBuffer {
+    inner: Arc<Mutex<ServerWrapperOutputInner>>,
 }
 
 impl ServerWrapperOutputBuffer {
     /// Creates a new server wrapper output buffer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the current offset in bytes.
-    pub fn current_offset(&self) -> usize {
-        self.inner
+    /// Returns the current offsets in bytes.
+    pub(crate) fn current_offsets(&self) -> ServerWrapperOutputOffsets {
+        let guard = self
+            .inner
             .lock()
-            .expect("server wrapper output buffer lock poisoned")
-            .len()
+            .expect("server wrapper output buffer lock poisoned");
+        ServerWrapperOutputOffsets {
+            stdout: guard.stdout.len(),
+            stderr: guard.stderr.len(),
+        }
     }
 
-    /// Appends bytes to the buffer.
-    pub fn append(&self, bytes: &[u8]) {
+    /// Appends bytes to the stdout buffer.
+    pub(crate) fn append_stdout(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
         self.inner
             .lock()
             .expect("server wrapper output buffer lock poisoned")
+            .stdout
             .extend_from_slice(bytes);
     }
 
-    /// Returns a copy of bytes between offsets.
-    pub fn slice(&self, start: usize, end: usize) -> Vec<u8> {
+    /// Appends bytes to the stderr buffer.
+    pub(crate) fn append_stderr(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.inner
+            .lock()
+            .expect("server wrapper output buffer lock poisoned")
+            .stderr
+            .extend_from_slice(bytes);
+    }
+
+    /// Returns copies of bytes between offsets.
+    pub(crate) fn slice(
+        &self,
+        start: ServerWrapperOutputOffsets,
+        end: ServerWrapperOutputOffsets,
+    ) -> ServerWrapperOutputSlice {
         let guard = self
             .inner
             .lock()
             .expect("server wrapper output buffer lock poisoned");
-        let start = start.min(guard.len());
-        let end = end.min(guard.len());
-        if start >= end {
-            return Vec::new();
-        }
-        guard[start..end].to_vec()
+        let stdout = {
+            let start = start.stdout.min(guard.stdout.len());
+            let end = end.stdout.min(guard.stdout.len());
+            if start >= end {
+                Vec::new()
+            } else {
+                guard.stdout[start..end].to_vec()
+            }
+        };
+        let stderr = {
+            let start = start.stderr.min(guard.stderr.len());
+            let end = end.stderr.min(guard.stderr.len());
+            if start >= end {
+                Vec::new()
+            } else {
+                guard.stderr[start..end].to_vec()
+            }
+        };
+        ServerWrapperOutputSlice { stdout, stderr }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ServerWrapperOutputInner {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ServerWrapperOutputOffsets {
+    pub(crate) stdout: usize,
+    pub(crate) stderr: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ServerWrapperOutputSlice {
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
 }
 
 /// A single output for a test or setup script: standard output, standard error, or a combined

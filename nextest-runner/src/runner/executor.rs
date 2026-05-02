@@ -41,12 +41,12 @@ use crate::{
     test_command::{ChildAccumulator, ChildFds},
     test_output::{
         CaptureStrategy, ChildExecutionOutput, ChildOutput, ChildSingleOutput, ChildSplitOutput,
-        ServerWrapperOutputBuffer,
+        ServerWrapperOutputBuffer, ServerWrapperOutputOffsets, ServerWrapperOutputSlice,
     },
     time::{PausableSleep, StopwatchStart},
 };
-use future_queue::FutureQueueContext;
 use bytes::Bytes;
+use future_queue::FutureQueueContext;
 use nextest_metadata::FilterMatch;
 use quick_junit::ReportUuid;
 use rand::{RngExt, distr::OpenClosed01};
@@ -60,7 +60,7 @@ use std::{
     process::{ExitStatus, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -121,6 +121,10 @@ impl<'a> ServerWrapperExecuteData<'a> {
 #[derive(Debug)]
 pub(super) struct ServerWrapperHandle<'a> {
     script_id: ScriptId,
+    program: String,
+    stress_index: Option<StressIndex>,
+    resp_tx: UnboundedSender<ExecutorEvent<'a>>,
+    shutdown_sent: AtomicBool,
     output_buffer: ServerWrapperOutputBuffer,
     remaining_tests: AtomicUsize,
     child: std::sync::Mutex<Child>,
@@ -130,16 +134,24 @@ pub(super) struct ServerWrapperHandle<'a> {
 }
 
 impl<'a> ServerWrapperHandle<'a> {
-    fn output_start_offset(&self) -> usize {
-        self.output_buffer.current_offset()
+    fn script_id(&self) -> &ScriptId {
+        &self.script_id
     }
 
-    fn output_slice(&self, start: usize, end: usize) -> Vec<u8> {
+    fn output_start_offset(&self) -> ServerWrapperOutputOffsets {
+        self.output_buffer.current_offsets()
+    }
+
+    fn output_slice(
+        &self,
+        start: ServerWrapperOutputOffsets,
+        end: ServerWrapperOutputOffsets,
+    ) -> ServerWrapperOutputSlice {
         self.output_buffer.slice(start, end)
     }
 
-    fn output_end_offset(&self) -> usize {
-        self.output_buffer.current_offset()
+    fn output_end_offset(&self) -> ServerWrapperOutputOffsets {
+        self.output_buffer.current_offsets()
     }
 
     fn on_test_finished(&self) {
@@ -150,10 +162,14 @@ impl<'a> ServerWrapperHandle<'a> {
     }
 
     fn request_shutdown(&self) {
-        if let Ok(mut child) = self
-            .child
-            .lock()
-        {
+        if !self.shutdown_sent.swap(true, Ordering::AcqRel) {
+            let _ = self.resp_tx.send(ExecutorEvent::ServerWrapperStopping {
+                stress_index: self.stress_index,
+                script_id: self.script_id.clone(),
+                program: self.program.clone(),
+            });
+        }
+        if let Ok(mut child) = self.child.lock() {
             let _ = child.start_kill();
         }
     }
@@ -322,10 +338,11 @@ impl<'a> ExecutorContext<'a> {
             program: packet.program.clone(),
         });
 
-        let mut cmd = match packet.make_command(self.profile.name(), &self.double_spawn, self.test_list) {
-            Ok(cmd) => cmd,
-            Err(_) => return None,
-        };
+        let mut cmd =
+            match packet.make_command(self.profile.name(), &self.double_spawn, self.test_list) {
+                Ok(cmd) => cmd,
+                Err(_) => return None,
+            };
         let command_mut = cmd.command_mut();
         command_mut.env("NEXTEST_RUN_ID", self.run_id.to_string());
         command_mut.env("NEXTEST_RUN_MODE", self.test_list.mode().to_string());
@@ -340,13 +357,17 @@ impl<'a> ExecutorContext<'a> {
         command_mut.stdin(Stdio::null());
         super::os::set_process_group(command_mut);
 
-        if self.capture_strategy != CaptureStrategy::None {
-            if packet.config.capture_stdout {
-                command_mut.stdout(Stdio::piped());
-            }
-            if packet.config.capture_stderr {
-                command_mut.stderr(Stdio::piped());
-            }
+        // Server wrapper output should never be inherited into the live
+        // terminal stream. When not captured, direct it to null.
+        if packet.config.capture_stdout {
+            command_mut.stdout(Stdio::piped());
+        } else {
+            command_mut.stdout(Stdio::null());
+        }
+        if packet.config.capture_stderr {
+            command_mut.stderr(Stdio::piped());
+        } else {
+            command_mut.stderr(Stdio::null());
         }
 
         let mut child = match cmd.spawn() {
@@ -365,7 +386,7 @@ impl<'a> ExecutorContext<'a> {
                 loop {
                     match stdout.read(&mut buf).await {
                         Ok(0) => break,
-                        Ok(n) => stdout_buffer.append(&buf[..n]),
+                        Ok(n) => stdout_buffer.append_stdout(&buf[..n]),
                         Err(_) => break,
                     }
                 }
@@ -377,30 +398,42 @@ impl<'a> ExecutorContext<'a> {
                 loop {
                     match stderr.read(&mut buf).await {
                         Ok(0) => break,
-                        Ok(n) => stderr_buffer.append(&buf[..n]),
+                        Ok(n) => stderr_buffer.append_stderr(&buf[..n]),
                         Err(_) => break,
                     }
                 }
             }
         });
 
-        if !self.wait_for_probe(packet.config).await {
+        let _ = resp_tx.send(ExecutorEvent::ServerWrapperSlow {
+            stress_index: packet.stress_index,
+            script_id: packet.script_id.clone(),
+            program: packet.program.clone(),
+            elapsed: Duration::ZERO,
+        });
+
+        if let Some(elapsed) = self.wait_for_probe(packet.config).await {
+            let _ = resp_tx.send(ExecutorEvent::ServerWrapperReady {
+                stress_index: packet.stress_index,
+                script_id: packet.script_id.clone(),
+                program: packet.program.clone(),
+                elapsed,
+            });
+        } else {
             let _ = resp_tx.send(ExecutorEvent::ServerWrapperSlow {
                 stress_index: packet.stress_index,
                 script_id: packet.script_id.clone(),
                 program: packet.program.clone(),
                 elapsed: packet.config.probe.timeout,
             });
-        } else {
-            let _ = resp_tx.send(ExecutorEvent::ServerWrapperReady {
-                stress_index: packet.stress_index,
-                script_id: packet.script_id.clone(),
-                program: packet.program.clone(),
-            });
         }
 
         Some(Arc::new(ServerWrapperHandle {
             script_id: packet.script_id,
+            program: packet.program,
+            stress_index: packet.stress_index,
+            resp_tx: resp_tx.clone(),
+            shutdown_sent: AtomicBool::new(false),
             output_buffer,
             remaining_tests: AtomicUsize::new(test_count),
             child: std::sync::Mutex::new(child),
@@ -410,14 +443,15 @@ impl<'a> ExecutorContext<'a> {
         }))
     }
 
-    async fn wait_for_probe(&self, config: &ServerWrapperConfig) -> bool {
+    async fn wait_for_probe(&self, config: &ServerWrapperConfig) -> Option<Duration> {
+        let start = tokio::time::Instant::now();
         let deadline = tokio::time::Instant::now() + config.probe.timeout;
         loop {
             if self.check_http_probe(&config.probe.url).await {
-                return true;
+                return Some(start.elapsed());
             }
             if tokio::time::Instant::now() >= deadline {
-                return false;
+                return None;
             }
             tokio::time::sleep(config.probe.interval).await;
         }
@@ -1390,8 +1424,8 @@ impl<'a> ExecutorContext<'a> {
         if let (Some(server_data), Some(start)) = (&test.server_wrapper_data, server_output_start) {
             let end = server_data.output_end_offset();
             let server_output = server_data.output_slice(start, end);
-            if !server_output.is_empty() {
-                output = append_server_output(output, &server_output);
+            if !server_output.stdout.is_empty() || !server_output.stderr.is_empty() {
+                output = append_server_output(output, &server_output, server_data.script_id());
             }
         }
 
@@ -1409,27 +1443,82 @@ impl<'a> ExecutorContext<'a> {
     }
 }
 
-fn append_server_output(output: ChildOutput, server_output: &[u8]) -> ChildOutput {
+fn append_server_output(
+    output: ChildOutput,
+    server_output: &ServerWrapperOutputSlice,
+    script_id: &ScriptId,
+) -> ChildOutput {
     match output {
         ChildOutput::Split(split) => {
-            let mut out = split
-                .stdout
-                .as_ref()
-                .map_or_else(Vec::new, |stdout| stdout.buf().to_vec());
-            out.extend_from_slice(server_output);
-            ChildOutput::Split(ChildSplitOutput {
-                stdout: Some(ChildSingleOutput::from(Bytes::from(out))),
-                stderr: split.stderr,
-            })
+            let stdout = append_server_stream_to_split(
+                split.stdout,
+                &server_output.stdout,
+                "stdout",
+                script_id,
+            );
+            let stderr = append_server_stream_to_split(
+                split.stderr,
+                &server_output.stderr,
+                "stderr",
+                script_id,
+            );
+            ChildOutput::Split(ChildSplitOutput { stdout, stderr })
         }
         ChildOutput::Combined { output } => {
             let mut out = output.buf().to_vec();
-            out.extend_from_slice(server_output);
+            append_labeled_output(
+                &mut out,
+                &server_output.stdout,
+                "server-wrapper stdout",
+                script_id,
+            );
+            append_labeled_output(
+                &mut out,
+                &server_output.stderr,
+                "server-wrapper stderr",
+                script_id,
+            );
             ChildOutput::Combined {
                 output: ChildSingleOutput::from(Bytes::from(out)),
             }
         }
     }
+}
+
+fn append_server_stream_to_split(
+    existing: Option<ChildSingleOutput>,
+    server_output: &[u8],
+    stream_name: &str,
+    script_id: &ScriptId,
+) -> Option<ChildSingleOutput> {
+    let mut out = existing.map_or_else(Vec::new, |output| output.buf().to_vec());
+    append_labeled_output(
+        &mut out,
+        server_output,
+        &format!("server-wrapper {stream_name}"),
+        script_id,
+    );
+    if out.is_empty() {
+        None
+    } else {
+        Some(ChildSingleOutput::from(Bytes::from(out)))
+    }
+}
+
+fn append_labeled_output(
+    out: &mut Vec<u8>,
+    server_output: &[u8],
+    label: &str,
+    script_id: &ScriptId,
+) {
+    if server_output.is_empty() {
+        return;
+    }
+    if !out.is_empty() && !out.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    out.extend_from_slice(format!("\n--- {label} ({script_id}) ---\n").as_bytes());
+    out.extend_from_slice(server_output);
 }
 
 fn check_http_probe_blocking(url: &str) -> bool {
@@ -1452,9 +1541,7 @@ fn check_http_probe_blocking(url: &str) -> bool {
     let Ok(mut stream) = TcpStream::connect(addr) else {
         return false;
     };
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    );
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }

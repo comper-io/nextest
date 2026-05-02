@@ -97,9 +97,9 @@ impl ScriptConfig {
             .keys()
             .filter(|k| self.wrapper.contains_key(*k) || self.server_wrapper.contains_key(*k))
             .chain(
-                self.wrapper
-                    .keys()
-                    .filter(|k| self.server_wrapper.contains_key(*k) && !self.setup.contains_key(*k)),
+                self.wrapper.keys().filter(|k| {
+                    self.server_wrapper.contains_key(*k) && !self.setup.contains_key(*k)
+                }),
             )
     }
 }
@@ -491,7 +491,6 @@ pub(crate) struct ServerWrapperScript<'profile> {
 
     /// The configuration for the script.
     pub(crate) config: &'profile ServerWrapperConfig,
-
 }
 
 /// Represents a to-be-run server wrapper command with a certain set of arguments.
@@ -960,11 +959,17 @@ pub struct ServerWrapperProbeConfig {
     pub url: String,
 
     /// Polling interval.
-    #[serde(default = "default_server_wrapper_probe_interval", with = "humantime_serde")]
+    #[serde(
+        default = "default_server_wrapper_probe_interval",
+        with = "humantime_serde"
+    )]
     pub interval: Duration,
 
     /// Maximum time to wait for readiness.
-    #[serde(default = "default_server_wrapper_probe_timeout", with = "humantime_serde")]
+    #[serde(
+        default = "default_server_wrapper_probe_timeout",
+        with = "humantime_serde"
+    )]
     pub timeout: Duration,
 }
 

@@ -643,7 +643,11 @@ impl TerminalProgress {
             | TestEventKind::InfoStarted { .. }
             | TestEventKind::InfoResponse { .. }
             | TestEventKind::InfoFinished { .. }
-            | TestEventKind::InputEnter { .. } => TerminalProgressValue::None,
+            | TestEventKind::InputEnter { .. }
+            | TestEventKind::ServerWrapperStarted { .. }
+            | TestEventKind::ServerWrapperWaitingForProbe { .. }
+            | TestEventKind::ServerWrapperReady { .. }
+            | TestEventKind::ServerWrapperStopping { .. } => TerminalProgressValue::None,
             TestEventKind::RunBeginCancel { current_stats, .. }
             | TestEventKind::RunBeginKill { current_stats, .. } => {
                 // In this case, always indicate an error.

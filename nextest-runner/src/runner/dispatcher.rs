@@ -659,16 +659,23 @@ where
                 }
             }
             InternalEvent::Executor(ExecutorEvent::ServerWrapperStarted {
-                script_id, program, ..
-            }) => {
-                debug!(%script_id, %program, "server wrapper started");
-                HandleEventResponse::None
-            }
+                script_id,
+                program,
+                ..
+            }) => self
+                .callback_none_response(TestEventKind::ServerWrapperStarted { script_id, program }),
             InternalEvent::Executor(ExecutorEvent::ServerWrapperReady {
-                script_id, program, ..
+                script_id,
+                program,
+                elapsed,
+                ..
             }) => {
-                debug!(%script_id, %program, "server wrapper ready");
-                HandleEventResponse::None
+                debug!(%script_id, %program, ?elapsed, "server wrapper ready");
+                self.callback_none_response(TestEventKind::ServerWrapperReady {
+                    script_id,
+                    program,
+                    elapsed,
+                })
             }
             InternalEvent::Executor(ExecutorEvent::ServerWrapperSlow {
                 script_id,
@@ -676,11 +683,24 @@ where
                 elapsed,
                 ..
             }) => {
-                debug!(%script_id, %program, ?elapsed, "server wrapper slow");
-                HandleEventResponse::None
+                debug!(%script_id, %program, ?elapsed, "server wrapper waiting for probe");
+                self.callback_none_response(TestEventKind::ServerWrapperWaitingForProbe {
+                    script_id,
+                    program,
+                })
             }
+            InternalEvent::Executor(ExecutorEvent::ServerWrapperStopping {
+                script_id,
+                program,
+                ..
+            }) => self.callback_none_response(TestEventKind::ServerWrapperStopping {
+                script_id,
+                program,
+            }),
             InternalEvent::Executor(ExecutorEvent::ServerWrapperFinished {
-                script_id, program, ..
+                script_id,
+                program,
+                ..
             }) => {
                 debug!(%script_id, %program, "server wrapper finished");
                 HandleEventResponse::None

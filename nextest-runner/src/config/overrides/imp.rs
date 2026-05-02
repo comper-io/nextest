@@ -11,8 +11,8 @@ use crate::{
             TestPriority, ThreadsRequired,
         },
         scripts::{
-            CompiledProfileScripts, DeserializedProfileScriptConfig, ScriptId,
-            ServerWrapperConfig, WrapperScriptConfig,
+            CompiledProfileScripts, DeserializedProfileScriptConfig, ScriptId, ServerWrapperConfig,
+            WrapperScriptConfig,
         },
     },
     errors::{

@@ -66,6 +66,10 @@ impl<'cfg> MetadataJunit<'cfg> {
             | TestEventKind::RunContinued { .. }
             | TestEventKind::StressSubRunFinished { .. } => {}
             TestEventKind::SetupScriptStarted { .. } | TestEventKind::SetupScriptSlow { .. } => {}
+            TestEventKind::ServerWrapperStarted { .. }
+            | TestEventKind::ServerWrapperWaitingForProbe { .. }
+            | TestEventKind::ServerWrapperReady { .. }
+            | TestEventKind::ServerWrapperStopping { .. } => {}
             TestEventKind::SetupScriptFinished {
                 stress_index,
                 index: _,

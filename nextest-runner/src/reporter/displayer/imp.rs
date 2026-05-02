@@ -795,6 +795,47 @@ impl<'a> DisplayReporterImpl<'a> {
                     self.write_setup_script_execute_status(run_status, writer)?;
                 }
             }
+            TestEventKind::ServerWrapperStarted { script_id, program } => {
+                writeln!(
+                    writer,
+                    "{:>12} starting server_wrapper {} ({})",
+                    "SERVER".style(self.styles.pass),
+                    script_id.style(self.styles.script_id),
+                    program,
+                )?;
+            }
+            TestEventKind::ServerWrapperWaitingForProbe { script_id, program } => {
+                writeln!(
+                    writer,
+                    "{:>12} waiting for probe for {} ({})",
+                    "SERVER".style(self.styles.skip),
+                    script_id.style(self.styles.script_id),
+                    program,
+                )?;
+            }
+            TestEventKind::ServerWrapperReady {
+                script_id,
+                program,
+                elapsed,
+            } => {
+                writeln!(
+                    writer,
+                    "{:>12} ready for {} ({}) {}",
+                    "SERVER".style(self.styles.pass),
+                    script_id.style(self.styles.script_id),
+                    program,
+                    DisplayDurationBy(*elapsed),
+                )?;
+            }
+            TestEventKind::ServerWrapperStopping { script_id, program } => {
+                writeln!(
+                    writer,
+                    "{:>12} stopping server_wrapper {} ({})",
+                    "SERVER".style(self.styles.skip),
+                    script_id.style(self.styles.script_id),
+                    program,
+                )?;
+            }
             TestEventKind::TestStarted {
                 stress_index,
                 test_instance,

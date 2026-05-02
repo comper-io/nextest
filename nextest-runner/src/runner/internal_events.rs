@@ -84,6 +84,7 @@ pub(super) enum ExecutorEvent<'a> {
         stress_index: Option<StressIndex>,
         script_id: ScriptId,
         program: String,
+        elapsed: Duration,
     },
     ServerWrapperSlow {
         #[expect(dead_code, reason = "kept for future progress reporting")]
@@ -91,6 +92,12 @@ pub(super) enum ExecutorEvent<'a> {
         script_id: ScriptId,
         program: String,
         elapsed: Duration,
+    },
+    ServerWrapperStopping {
+        #[expect(dead_code, reason = "kept for future progress reporting")]
+        stress_index: Option<StressIndex>,
+        script_id: ScriptId,
+        program: String,
     },
     #[expect(dead_code, reason = "reserved for future lifecycle reporting")]
     ServerWrapperFinished {

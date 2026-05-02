@@ -190,6 +190,45 @@ pub enum TestEventKind<'a> {
         run_status: SetupScriptExecuteStatus<LiveSpec>,
     },
 
+    /// A server wrapper process started.
+    ServerWrapperStarted {
+        /// The script ID.
+        script_id: ScriptId,
+
+        /// The program to run.
+        program: String,
+    },
+
+    /// Waiting for a server wrapper probe to become ready.
+    ServerWrapperWaitingForProbe {
+        /// The script ID.
+        script_id: ScriptId,
+
+        /// The program to run.
+        program: String,
+    },
+
+    /// A server wrapper probe succeeded and is ready.
+    ServerWrapperReady {
+        /// The script ID.
+        script_id: ScriptId,
+
+        /// The program to run.
+        program: String,
+
+        /// The time taken for the probe to succeed.
+        elapsed: Duration,
+    },
+
+    /// A server wrapper process is being stopped.
+    ServerWrapperStopping {
+        /// The script ID.
+        script_id: ScriptId,
+
+        /// The program to run.
+        program: String,
+    },
+
     // TODO: add events for BinaryStarted and BinaryFinished? May want a slightly different way to
     // do things, maybe a couple of reporter traits (one for the run as a whole and one for each
     // binary).

@@ -29,14 +29,8 @@ use nextest_metadata::FilterMatch;
 use quick_junit::ReportUuid;
 use semver::Version;
 use std::{
-    collections::BTreeSet,
-    convert::Infallible,
-    fmt,
-    num::NonZero,
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
+    collections::BTreeSet, convert::Infallible, fmt, num::NonZero, pin::Pin, str::FromStr,
+    sync::Arc, time::Duration,
 };
 use tokio::{
     runtime::Runtime,

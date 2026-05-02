@@ -652,7 +652,11 @@ impl TestEventKindSummary<LiveSpec> {
             | TestEventKind::InfoResponse { .. }
             | TestEventKind::InfoFinished { .. }
             | TestEventKind::InputEnter { .. }
-            | TestEventKind::RunBeginKill { .. } => return None,
+            | TestEventKind::RunBeginKill { .. }
+            | TestEventKind::ServerWrapperStarted { .. }
+            | TestEventKind::ServerWrapperWaitingForProbe { .. }
+            | TestEventKind::ServerWrapperReady { .. }
+            | TestEventKind::ServerWrapperStopping { .. } => return None,
         })
     }
 }
