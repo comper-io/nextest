@@ -19,7 +19,7 @@ use crate::{
         },
         scripts::{
             DeserializedProfileScriptConfig, ProfileScriptType, ScriptConfig, ScriptId, ScriptInfo,
-            SetupScriptConfig, SetupScripts,
+            ServerWrappers, SetupScriptConfig, SetupScripts,
         },
     },
     errors::{
@@ -82,8 +82,8 @@ pub trait ConfigWarnings {
         tool: Option<&ToolName>,
     );
 
-    /// Handle warning about empty script sections with neither setup nor
-    /// wrapper scripts.
+    /// Handle warning about empty script sections with neither setup,
+    /// wrapper, nor server-wrapper scripts.
     fn empty_script_sections(
         &mut self,
         config_file: &Utf8Path,
@@ -174,7 +174,7 @@ impl ConfigWarnings for DefaultConfigWarnings {
     ) {
         warn!(
             "in config file {}{}, [[profile.{}.scripts]] has {} {} \
-             with neither setup nor wrapper scripts",
+             with neither setup, wrapper, nor server-wrapper scripts",
             config_file
                 .strip_prefix(workspace_root)
                 .unwrap_or(config_file),
@@ -523,6 +523,11 @@ impl NextestConfig {
             {
                 missing_features.insert(ConfigExperimental::WrapperScripts);
             }
+            if !this_config.scripts.server_wrapper.is_empty()
+                && !experimental.contains(&ConfigExperimental::ServerWrappers)
+            {
+                missing_features.insert(ConfigExperimental::ServerWrappers);
+            }
             if !missing_features.is_empty() {
                 return Err(ConfigParseError::new(
                     config_file,
@@ -703,6 +708,7 @@ impl NextestConfig {
             if scripts.setup.is_empty()
                 && scripts.list_wrapper.is_none()
                 && scripts.run_wrapper.is_none()
+                && scripts.server_wrapper.is_none()
             {
                 empty_script_count += 1;
             }
@@ -725,6 +731,12 @@ impl NextestConfig {
                 scripts.data.expr(),
                 scripts.run_wrapper.as_slice(),
             );
+            check_script_ids(
+                "default",
+                ProfileScriptType::ServerWrapper,
+                scripts.data.expr(),
+                scripts.server_wrapper.as_slice(),
+            );
         });
 
         if empty_script_count > 0 {
@@ -743,6 +755,7 @@ impl NextestConfig {
                 if scripts.setup.is_empty()
                     && scripts.list_wrapper.is_none()
                     && scripts.run_wrapper.is_none()
+                    && scripts.server_wrapper.is_none()
                 {
                     empty_script_count += 1;
                 }
@@ -764,6 +777,12 @@ impl NextestConfig {
                     ProfileScriptType::RunWrapper,
                     scripts.data.expr(),
                     scripts.run_wrapper.as_slice(),
+                );
+                check_script_ids(
+                    profile_name,
+                    ProfileScriptType::ServerWrapper,
+                    scripts.data.expr(),
+                    scripts.server_wrapper.as_slice(),
                 );
             });
 
@@ -1199,6 +1218,11 @@ impl<'cfg> EvaluatableProfile<'cfg> {
     /// Returns the list of setup scripts.
     pub fn setup_scripts(&self, test_list: &TestList<'_>) -> SetupScripts<'_> {
         SetupScripts::new(self, test_list)
+    }
+
+    /// Returns the list of server wrapper scripts.
+    pub fn server_wrappers(&self, test_list: &TestList<'_>) -> ServerWrappers<'_> {
+        ServerWrappers::new(self, test_list)
     }
 
     /// Returns list-time settings for a test binary.

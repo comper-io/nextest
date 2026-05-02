@@ -73,6 +73,32 @@ pub(super) enum ExecutorEvent<'a> {
         total: usize,
         status: SetupScriptExecuteStatus<LiveSpec>,
     },
+    ServerWrapperStarted {
+        #[expect(dead_code, reason = "kept for future progress reporting")]
+        stress_index: Option<StressIndex>,
+        script_id: ScriptId,
+        program: String,
+    },
+    ServerWrapperReady {
+        #[expect(dead_code, reason = "kept for future progress reporting")]
+        stress_index: Option<StressIndex>,
+        script_id: ScriptId,
+        program: String,
+    },
+    ServerWrapperSlow {
+        #[expect(dead_code, reason = "kept for future progress reporting")]
+        stress_index: Option<StressIndex>,
+        script_id: ScriptId,
+        program: String,
+        elapsed: Duration,
+    },
+    #[expect(dead_code, reason = "reserved for future lifecycle reporting")]
+    ServerWrapperFinished {
+        stress_index: Option<StressIndex>,
+        script_id: ScriptId,
+        program: String,
+        result: ExecutionResult,
+    },
     Started {
         stress_index: Option<StressIndex>,
         test_instance: TestInstance<'a>,

@@ -19,7 +19,10 @@ use crate::{
             FlakyResult, LeakTimeout, LeakTimeoutResult, RetryPolicy, SlowTimeout, TestGroup,
         },
         overrides::TestSettings,
-        scripts::{ScriptId, SetupScriptCommand, SetupScriptConfig, SetupScriptExecuteData},
+        scripts::{
+            ScriptId, ServerWrapperCommand, ServerWrapperConfig, SetupScriptCommand,
+            SetupScriptConfig, SetupScriptExecuteData,
+        },
     },
     double_spawn::DoubleSpawnInfo,
     errors::{ChildError, ChildFdError, ChildStartError, ErrorList},
@@ -36,27 +39,39 @@ use crate::{
     },
     target_runner::TargetRunner,
     test_command::{ChildAccumulator, ChildFds},
-    test_output::{CaptureStrategy, ChildExecutionOutput, ChildOutput, ChildSplitOutput},
+    test_output::{
+        CaptureStrategy, ChildExecutionOutput, ChildOutput, ChildSingleOutput, ChildSplitOutput,
+        ServerWrapperOutputBuffer,
+    },
     time::{PausableSleep, StopwatchStart},
 };
 use future_queue::FutureQueueContext;
+use bytes::Bytes;
 use nextest_metadata::FilterMatch;
 use quick_junit::ReportUuid;
 use rand::{RngExt, distr::OpenClosed01};
 use std::{
+    collections::HashMap,
     fmt,
+    io::{BufRead, BufReader as StdBufReader, Write},
+    net::TcpStream,
     num::NonZeroUsize,
     pin::Pin,
     process::{ExitStatus, Stdio},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
+    io::AsyncReadExt,
     process::Child,
     sync::{
         mpsc::{UnboundedReceiver, UnboundedSender},
         oneshot,
     },
+    task::JoinHandle,
 };
 use tracing::{debug, instrument};
 
@@ -76,6 +91,72 @@ pub(super) struct ExecutorContext<'a> {
     force_flaky_result: Option<FlakyResult>,
     interceptor: Interceptor,
     version_env_vars: Option<VersionEnvVars>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ServerWrapperExecuteData<'a> {
+    by_script_id: HashMap<ScriptId, Arc<ServerWrapperHandle<'a>>>,
+}
+
+impl<'a> ServerWrapperExecuteData<'a> {
+    pub(super) fn new(handles: impl IntoIterator<Item = Arc<ServerWrapperHandle<'a>>>) -> Self {
+        let by_script_id = handles
+            .into_iter()
+            .map(|handle| (handle.script_id.clone(), handle))
+            .collect();
+        Self { by_script_id }
+    }
+
+    pub(super) fn for_script(&self, script_id: &ScriptId) -> Option<Arc<ServerWrapperHandle<'a>>> {
+        self.by_script_id.get(script_id).cloned()
+    }
+
+    pub(super) fn shutdown_all(&self) {
+        for handle in self.by_script_id.values() {
+            handle.request_shutdown();
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct ServerWrapperHandle<'a> {
+    script_id: ScriptId,
+    output_buffer: ServerWrapperOutputBuffer,
+    remaining_tests: AtomicUsize,
+    child: std::sync::Mutex<Child>,
+    _stdout_task: JoinHandle<()>,
+    _stderr_task: JoinHandle<()>,
+    _marker: std::marker::PhantomData<&'a ServerWrapperConfig>,
+}
+
+impl<'a> ServerWrapperHandle<'a> {
+    fn output_start_offset(&self) -> usize {
+        self.output_buffer.current_offset()
+    }
+
+    fn output_slice(&self, start: usize, end: usize) -> Vec<u8> {
+        self.output_buffer.slice(start, end)
+    }
+
+    fn output_end_offset(&self) -> usize {
+        self.output_buffer.current_offset()
+    }
+
+    fn on_test_finished(&self) {
+        let previous = self.remaining_tests.fetch_sub(1, Ordering::AcqRel);
+        if previous <= 1 {
+            self.request_shutdown();
+        }
+    }
+
+    fn request_shutdown(&self) {
+        if let Ok(mut child) = self
+            .child
+            .lock()
+        {
+            let _ = child.start_kill();
+        }
+    }
 }
 
 impl<'a> ExecutorContext<'a> {
@@ -199,6 +280,157 @@ impl<'a> ExecutorContext<'a> {
         setup_script_data
     }
 
+    /// Run server wrappers and return runtime handles for active wrappers.
+    pub(super) async fn run_server_wrappers(
+        &self,
+        stress_index: Option<StressIndex>,
+        resp_tx: UnboundedSender<ExecutorEvent<'a>>,
+    ) -> ServerWrapperExecuteData<'a> {
+        let mut handles = Vec::new();
+        for script in self.profile.server_wrappers(self.test_list).into_iter() {
+            let packet = ServerWrapperPacket {
+                stress_index,
+                script_id: script.id.clone(),
+                config: script.config,
+                program: script.config.command.program(
+                    self.test_list.workspace_root(),
+                    &self.test_list.rust_build_meta().target_directory,
+                ),
+            };
+
+            let Some(handle) = self
+                .run_server_wrapper(packet, usize::MAX / 2, resp_tx.clone())
+                .await
+            else {
+                continue;
+            };
+            handles.push(handle);
+        }
+
+        ServerWrapperExecuteData::new(handles)
+    }
+
+    async fn run_server_wrapper(
+        &self,
+        packet: ServerWrapperPacket<'a>,
+        test_count: usize,
+        resp_tx: UnboundedSender<ExecutorEvent<'a>>,
+    ) -> Option<Arc<ServerWrapperHandle<'a>>> {
+        let _ = resp_tx.send(ExecutorEvent::ServerWrapperStarted {
+            stress_index: packet.stress_index,
+            script_id: packet.script_id.clone(),
+            program: packet.program.clone(),
+        });
+
+        let mut cmd = match packet.make_command(self.profile.name(), &self.double_spawn, self.test_list) {
+            Ok(cmd) => cmd,
+            Err(_) => return None,
+        };
+        let command_mut = cmd.command_mut();
+        command_mut.env("NEXTEST_RUN_ID", self.run_id.to_string());
+        command_mut.env("NEXTEST_RUN_MODE", self.test_list.mode().to_string());
+        command_mut.env("NEXTEST_TEST_THREADS", self.test_threads.to_string());
+        command_mut.env(
+            "NEXTEST_WORKSPACE_ROOT",
+            self.test_list.workspace_root().as_str(),
+        );
+        if let Some(version_env_vars) = &self.version_env_vars {
+            version_env_vars.apply_env(command_mut);
+        }
+        command_mut.stdin(Stdio::null());
+        super::os::set_process_group(command_mut);
+
+        if self.capture_strategy != CaptureStrategy::None {
+            if packet.config.capture_stdout {
+                command_mut.stdout(Stdio::piped());
+            }
+            if packet.config.capture_stderr {
+                command_mut.stderr(Stdio::piped());
+            }
+        }
+
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(_) => return None,
+        };
+        let output_buffer = ServerWrapperOutputBuffer::new();
+
+        let mut stdout_reader = child.stdout.take();
+        let mut stderr_reader = child.stderr.take();
+        let stdout_buffer = output_buffer.clone();
+        let stderr_buffer = output_buffer.clone();
+        let stdout_task = tokio::spawn(async move {
+            if let Some(mut stdout) = stdout_reader.take() {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match stdout.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => stdout_buffer.append(&buf[..n]),
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+        let stderr_task = tokio::spawn(async move {
+            if let Some(mut stderr) = stderr_reader.take() {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match stderr.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => stderr_buffer.append(&buf[..n]),
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+
+        if !self.wait_for_probe(packet.config).await {
+            let _ = resp_tx.send(ExecutorEvent::ServerWrapperSlow {
+                stress_index: packet.stress_index,
+                script_id: packet.script_id.clone(),
+                program: packet.program.clone(),
+                elapsed: packet.config.probe.timeout,
+            });
+        } else {
+            let _ = resp_tx.send(ExecutorEvent::ServerWrapperReady {
+                stress_index: packet.stress_index,
+                script_id: packet.script_id.clone(),
+                program: packet.program.clone(),
+            });
+        }
+
+        Some(Arc::new(ServerWrapperHandle {
+            script_id: packet.script_id,
+            output_buffer,
+            remaining_tests: AtomicUsize::new(test_count),
+            child: std::sync::Mutex::new(child),
+            _stdout_task: stdout_task,
+            _stderr_task: stderr_task,
+            _marker: std::marker::PhantomData,
+        }))
+    }
+
+    async fn wait_for_probe(&self, config: &ServerWrapperConfig) -> bool {
+        let deadline = tokio::time::Instant::now() + config.probe.timeout;
+        loop {
+            if self.check_http_probe(&config.probe.url).await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(config.probe.interval).await;
+        }
+    }
+
+    async fn check_http_probe(&self, url: &str) -> bool {
+        let url = url.to_owned();
+        tokio::task::spawn_blocking(move || check_http_probe_blocking(&url))
+            .await
+            .ok()
+            .unwrap_or(false)
+    }
+
     /// Returns a future that runs all attempts of a single test instance.
     pub(super) async fn run_test_instance(
         &self,
@@ -207,6 +439,7 @@ impl<'a> ExecutorContext<'a> {
         cx: FutureQueueContext,
         resp_tx: UnboundedSender<ExecutorEvent<'a>>,
         setup_script_data: Arc<SetupScriptExecuteData<'a>>,
+        server_wrapper_data: Arc<ServerWrapperExecuteData<'a>>,
     ) {
         debug!(test_name = %test.instance.name, "running test");
 
@@ -312,6 +545,9 @@ impl<'a> ExecutorContext<'a> {
                 retry_data,
                 settings: settings.clone(),
                 setup_script_data: setup_script_data.clone(),
+                server_wrapper_data: settings
+                    .server_wrapper_id()
+                    .and_then(|script_id| server_wrapper_data.for_script(script_id)),
                 delay_before_start: delay,
             };
 
@@ -371,6 +607,13 @@ impl<'a> ExecutorContext<'a> {
             junit_flaky_fail_status: settings.junit_flaky_fail_status(),
             last_run_status,
         });
+
+        if let Some(handle) = settings
+            .server_wrapper_id()
+            .and_then(|script_id| server_wrapper_data.for_script(script_id))
+        {
+            handle.on_test_finished();
+        }
     }
 
     // ---
@@ -733,6 +976,11 @@ impl<'a> ExecutorContext<'a> {
         resp_tx: &UnboundedSender<ExecutorEvent<'a>>,
         req_rx: &mut UnboundedReceiver<RunUnitRequest<'a>>,
     ) -> Result<InternalExecuteStatus<'a>, ChildStartError> {
+        let server_output_start = test
+            .server_wrapper_data
+            .as_ref()
+            .map(|data| data.output_start_offset());
+
         let ctx = self.test_execute_context();
         let mut cmd = test.test_instance.make_command(
             &ctx,
@@ -1138,18 +1386,89 @@ impl<'a> ExecutorContext<'a> {
             stderr_len,
         });
 
+        let mut output = child_acc.output.freeze();
+        if let (Some(server_data), Some(start)) = (&test.server_wrapper_data, server_output_start) {
+            let end = server_data.output_end_offset();
+            let server_output = server_data.output_slice(start, end);
+            if !server_output.is_empty() {
+                output = append_server_output(output, &server_output);
+            }
+        }
+
         Ok(InternalExecuteStatus {
             test,
             slow_after: cx.slow_after,
             output: ChildExecutionOutput::Output {
                 result: Some(exec_result),
-                output: child_acc.output.freeze(),
+                output,
                 errors: ErrorList::new(UnitKind::WAITING_ON_TEST_MESSAGE, child_acc.errors),
             },
             result: exec_result,
             stopwatch_end,
         })
     }
+}
+
+fn append_server_output(output: ChildOutput, server_output: &[u8]) -> ChildOutput {
+    match output {
+        ChildOutput::Split(split) => {
+            let mut out = split
+                .stdout
+                .as_ref()
+                .map_or_else(Vec::new, |stdout| stdout.buf().to_vec());
+            out.extend_from_slice(server_output);
+            ChildOutput::Split(ChildSplitOutput {
+                stdout: Some(ChildSingleOutput::from(Bytes::from(out))),
+                stderr: split.stderr,
+            })
+        }
+        ChildOutput::Combined { output } => {
+            let mut out = output.buf().to_vec();
+            out.extend_from_slice(server_output);
+            ChildOutput::Combined {
+                output: ChildSingleOutput::from(Bytes::from(out)),
+            }
+        }
+    }
+}
+
+fn check_http_probe_blocking(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let (host_port, path) = match rest.split_once('/') {
+        Some((hp, path)) => (hp, format!("/{}", path)),
+        None => (rest, "/".to_owned()),
+    };
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port)) => match port.parse::<u16>() {
+            Ok(port) => (host.to_owned(), port),
+            Err(_) => return false,
+        },
+        None => (host_port.to_owned(), 80),
+    };
+
+    let addr = format!("{host}:{port}");
+    let Ok(mut stream) = TcpStream::connect(addr) else {
+        return false;
+    };
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut reader = StdBufReader::new(stream);
+    let mut status_line = String::new();
+    if reader.read_line(&mut status_line).is_err() {
+        return false;
+    }
+    let mut parts = status_line.split_whitespace();
+    let _http_version = parts.next();
+    let Some(code) = parts.next() else {
+        return false;
+    };
+    matches!(code.parse::<u16>(), Ok(200..=299))
 }
 
 #[derive(Debug)]
@@ -1271,6 +1590,7 @@ pub(super) struct TestPacket<'a> {
     retry_data: RetryData,
     settings: Arc<TestSettings<'a>>,
     setup_script_data: Arc<SetupScriptExecuteData<'a>>,
+    server_wrapper_data: Option<Arc<ServerWrapperHandle<'a>>>,
     delay_before_start: Duration,
 }
 
@@ -1323,6 +1643,25 @@ pub(super) struct SetupScriptPacket<'a> {
     script_id: ScriptId,
     config: &'a SetupScriptConfig,
     program: String,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ServerWrapperPacket<'a> {
+    stress_index: Option<StressIndex>,
+    script_id: ScriptId,
+    config: &'a ServerWrapperConfig,
+    program: String,
+}
+
+impl<'a> ServerWrapperPacket<'a> {
+    fn make_command(
+        &self,
+        profile_name: &str,
+        double_spawn: &DoubleSpawnInfo,
+        test_list: &TestList<'_>,
+    ) -> Result<ServerWrapperCommand, ChildStartError> {
+        ServerWrapperCommand::new(self.config, profile_name, double_spawn, test_list)
+    }
 }
 
 impl<'a> SetupScriptPacket<'a> {
@@ -1656,5 +1995,51 @@ fn create_execution_result(
             failure_status: FailureStatus::extract(exit_status),
             leaked,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_http_probe_blocking;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    #[test]
+    fn http_probe_succeeds_for_2xx() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind succeeds");
+        let addr = listener.local_addr().expect("local addr available");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept succeeds");
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .expect("response write succeeds");
+        });
+
+        let url = format!("http://{addr}/health");
+        assert!(check_http_probe_blocking(&url));
+        handle.join().expect("server thread joins");
+    }
+
+    #[test]
+    fn http_probe_fails_for_non_2xx() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind succeeds");
+        let addr = listener.local_addr().expect("local addr available");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept succeeds");
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .expect("response write succeeds");
+        });
+
+        let url = format!("http://{addr}/health");
+        assert!(!check_http_probe_blocking(&url));
+        handle.join().expect("server thread joins");
     }
 }

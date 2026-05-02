@@ -658,6 +658,33 @@ where
                     HandleEventResponse::None
                 }
             }
+            InternalEvent::Executor(ExecutorEvent::ServerWrapperStarted {
+                script_id, program, ..
+            }) => {
+                debug!(%script_id, %program, "server wrapper started");
+                HandleEventResponse::None
+            }
+            InternalEvent::Executor(ExecutorEvent::ServerWrapperReady {
+                script_id, program, ..
+            }) => {
+                debug!(%script_id, %program, "server wrapper ready");
+                HandleEventResponse::None
+            }
+            InternalEvent::Executor(ExecutorEvent::ServerWrapperSlow {
+                script_id,
+                program,
+                elapsed,
+                ..
+            }) => {
+                debug!(%script_id, %program, ?elapsed, "server wrapper slow");
+                HandleEventResponse::None
+            }
+            InternalEvent::Executor(ExecutorEvent::ServerWrapperFinished {
+                script_id, program, ..
+            }) => {
+                debug!(%script_id, %program, "server wrapper finished");
+                HandleEventResponse::None
+            }
             InternalEvent::Executor(ExecutorEvent::Started {
                 stress_index,
                 test_instance,

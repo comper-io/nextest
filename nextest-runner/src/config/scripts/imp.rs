@@ -37,6 +37,7 @@ use std::{
     fmt,
     process::Command,
     sync::Arc,
+    time::Duration,
 };
 use swrite::{SWrite, swrite};
 
@@ -51,11 +52,14 @@ pub struct ScriptConfig {
     /// The wrapper scripts defined in nextest's configuration.
     #[serde(default)]
     pub wrapper: IndexMap<ScriptId, WrapperScriptConfig>,
+    /// The server wrapper scripts defined in nextest's configuration.
+    #[serde(default)]
+    pub server_wrapper: IndexMap<ScriptId, ServerWrapperConfig>,
 }
 
 impl ScriptConfig {
     pub(in crate::config) fn is_empty(&self) -> bool {
-        self.setup.is_empty() && self.wrapper.is_empty()
+        self.setup.is_empty() && self.wrapper.is_empty() && self.server_wrapper.is_empty()
     }
 
     /// Returns information about the script with the given ID.
@@ -66,6 +70,8 @@ impl ScriptConfig {
             ScriptType::Setup
         } else if self.wrapper.contains_key(&id) {
             ScriptType::Wrapper
+        } else if self.server_wrapper.contains_key(&id) {
+            ScriptType::ServerWrapper
         } else {
             panic!("ScriptConfig::script_info called with invalid script ID: {id}")
         };
@@ -78,13 +84,23 @@ impl ScriptConfig {
 
     /// Returns an iterator over the names of all scripts of all types.
     pub(in crate::config) fn all_script_ids(&self) -> impl Iterator<Item = &ScriptId> {
-        self.setup.keys().chain(self.wrapper.keys())
+        self.setup
+            .keys()
+            .chain(self.wrapper.keys())
+            .chain(self.server_wrapper.keys())
     }
 
     /// Returns an iterator over names that are used by more than one type of
     /// script.
     pub(in crate::config) fn duplicate_ids(&self) -> impl Iterator<Item = &ScriptId> {
-        self.wrapper.keys().filter(|k| self.setup.contains_key(*k))
+        self.setup
+            .keys()
+            .filter(|k| self.wrapper.contains_key(*k) || self.server_wrapper.contains_key(*k))
+            .chain(
+                self.wrapper
+                    .keys()
+                    .filter(|k| self.server_wrapper.contains_key(*k) && !self.setup.contains_key(*k)),
+            )
     }
 }
 
@@ -114,6 +130,9 @@ pub enum ScriptType {
 
     /// A wrapper script.
     Wrapper,
+
+    /// A server wrapper script.
+    ServerWrapper,
 }
 
 impl ScriptType {
@@ -124,6 +143,7 @@ impl ScriptType {
                 profile_script_type == ProfileScriptType::ListWrapper
                     || profile_script_type == ProfileScriptType::RunWrapper
             }
+            ScriptType::ServerWrapper => profile_script_type == ProfileScriptType::ServerWrapper,
         }
     }
 }
@@ -133,6 +153,7 @@ impl fmt::Display for ScriptType {
         match self {
             ScriptType::Setup => f.write_str("setup"),
             ScriptType::Wrapper => f.write_str("wrapper"),
+            ScriptType::ServerWrapper => f.write_str("server-wrapper"),
         }
     }
 }
@@ -148,6 +169,9 @@ pub enum ProfileScriptType {
 
     /// A run-time wrapper script.
     RunWrapper,
+
+    /// A server wrapper script.
+    ServerWrapper,
 }
 
 impl fmt::Display for ProfileScriptType {
@@ -156,6 +180,7 @@ impl fmt::Display for ProfileScriptType {
             ProfileScriptType::Setup => f.write_str("setup"),
             ProfileScriptType::ListWrapper => f.write_str("list-wrapper"),
             ProfileScriptType::RunWrapper => f.write_str("run-wrapper"),
+            ProfileScriptType::ServerWrapper => f.write_str("server-wrapper"),
         }
     }
 }
@@ -365,6 +390,171 @@ pub(crate) struct SetupScriptExecuteData<'profile> {
     env_maps: Vec<(SetupScript<'profile>, SetupScriptEnvMap)>,
 }
 
+/// Data about server wrappers, returned by an [`EvaluatableProfile`].
+pub struct ServerWrappers<'profile> {
+    enabled_scripts: IndexMap<&'profile ScriptId, ServerWrapperScript<'profile>>,
+}
+
+impl<'profile> ServerWrappers<'profile> {
+    pub(in crate::config) fn new(
+        profile: &'profile EvaluatableProfile<'_>,
+        test_list: &TestList<'_>,
+    ) -> Self {
+        Self::new_with_queries(
+            profile,
+            test_list
+                .iter_tests()
+                .filter(|test| test.test_info.filter_match.is_match())
+                .map(|test| test.to_test_query()),
+        )
+    }
+
+    fn new_with_queries<'a>(
+        profile: &'profile EvaluatableProfile<'_>,
+        matching_tests: impl IntoIterator<Item = TestQuery<'a>>,
+    ) -> Self {
+        let script_config = profile.script_config();
+        let profile_scripts = &profile.compiled_data.scripts;
+        if profile_scripts.is_empty() {
+            return Self {
+                enabled_scripts: IndexMap::new(),
+            };
+        }
+
+        let mut by_script_id = HashMap::new();
+        for profile_script in profile_scripts {
+            if let Some(script_id) = &profile_script.server_wrapper {
+                by_script_id
+                    .entry(script_id)
+                    .or_insert_with(Vec::new)
+                    .push(profile_script);
+            }
+        }
+
+        let env = profile.filterset_ecx();
+
+        let mut enabled_ids = HashSet::new();
+        for test in matching_tests {
+            for (&script_id, compiled) in &by_script_id {
+                if enabled_ids.contains(script_id) {
+                    continue;
+                }
+                if compiled.iter().any(|data| data.is_enabled(&test, &env)) {
+                    enabled_ids.insert(script_id);
+                }
+            }
+        }
+
+        let mut enabled_scripts = IndexMap::new();
+        for (script_id, config) in &script_config.server_wrapper {
+            if enabled_ids.contains(script_id) {
+                by_script_id
+                    .remove(script_id)
+                    .expect("script id must be present");
+                enabled_scripts.insert(
+                    script_id,
+                    ServerWrapperScript {
+                        id: script_id.clone(),
+                        config,
+                    },
+                );
+            }
+        }
+
+        Self { enabled_scripts }
+    }
+
+    #[inline]
+    /// Returns the number of enabled server wrappers.
+    pub fn len(&self) -> usize {
+        self.enabled_scripts.len()
+    }
+
+    #[inline]
+    /// Returns true if there are no enabled server wrappers.
+    pub fn is_empty(&self) -> bool {
+        self.enabled_scripts.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn into_iter(self) -> impl Iterator<Item = ServerWrapperScript<'profile>> {
+        self.enabled_scripts.into_values()
+    }
+}
+
+/// Data about an individual server wrapper script.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub(crate) struct ServerWrapperScript<'profile> {
+    /// The script ID.
+    pub(crate) id: ScriptId,
+
+    /// The configuration for the script.
+    pub(crate) config: &'profile ServerWrapperConfig,
+
+}
+
+/// Represents a to-be-run server wrapper command with a certain set of arguments.
+pub(crate) struct ServerWrapperCommand {
+    /// The command to be run.
+    command: std::process::Command,
+    /// Double-spawn context.
+    double_spawn: Option<DoubleSpawnContext>,
+}
+
+impl ServerWrapperCommand {
+    /// Creates a new `ServerWrapperCommand` for a server wrapper script.
+    pub(crate) fn new(
+        config: &ServerWrapperConfig,
+        profile_name: &str,
+        double_spawn: &DoubleSpawnInfo,
+        test_list: &TestList<'_>,
+    ) -> Result<Self, ChildStartError> {
+        let mut cmd = create_command(
+            config.command.program(
+                test_list.workspace_root(),
+                &test_list.rust_build_meta().target_directory,
+            ),
+            &config.command.args,
+            double_spawn,
+        );
+
+        // Apply Cargo's config.toml env first (workspace-wide), then the
+        // script's command.env (per-script). This way command.env takes
+        // priority as the more specific configuration.
+        test_list.cargo_env().apply_env(&mut cmd);
+        config.command.env.apply_env(&mut cmd);
+
+        cmd.current_dir(test_list.workspace_root())
+            .env("NEXTEST", "1")
+            .env("NEXTEST_PROFILE", profile_name);
+
+        apply_ld_dyld_env(&mut cmd, test_list.updated_dylib_path());
+
+        let double_spawn = double_spawn.spawn_context();
+
+        Ok(Self {
+            command: cmd,
+            double_spawn,
+        })
+    }
+
+    /// Returns the command to be run.
+    #[inline]
+    pub(crate) fn command_mut(&mut self) -> &mut std::process::Command {
+        &mut self.command
+    }
+
+    pub(crate) fn spawn(self) -> std::io::Result<tokio::process::Child> {
+        let mut command = tokio::process::Command::from(self.command);
+        let res = command.spawn();
+        if let Some(ctx) = self.double_spawn {
+            ctx.finish();
+        }
+        res
+    }
+}
+
 impl<'profile> SetupScriptExecuteData<'profile> {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -391,6 +581,7 @@ pub(crate) struct CompiledProfileScripts<State> {
     pub(in crate::config) setup: Vec<ScriptId>,
     pub(in crate::config) list_wrapper: Option<ScriptId>,
     pub(in crate::config) run_wrapper: Option<ScriptId>,
+    pub(in crate::config) server_wrapper: Option<ScriptId>,
     pub(in crate::config) data: ProfileScriptData,
     pub(in crate::config) state: State,
 }
@@ -439,6 +630,7 @@ impl CompiledProfileScripts<PreBuildPlatform> {
                 setup: source.setup.clone(),
                 list_wrapper: source.list_wrapper.clone(),
                 run_wrapper: source.run_wrapper.clone(),
+                server_wrapper: source.server_wrapper.clone(),
                 data: ProfileScriptData {
                     host_spec,
                     target_spec,
@@ -482,6 +674,7 @@ impl CompiledProfileScripts<PreBuildPlatform> {
             setup: self.setup,
             list_wrapper: self.list_wrapper,
             run_wrapper: self.run_wrapper,
+            server_wrapper: self.server_wrapper,
             data: self.data,
             state: FinalConfig {
                 host_eval,
@@ -624,6 +817,10 @@ pub(in crate::config) struct DeserializedProfileScriptConfig {
     /// The wrapper script to run at run time.
     #[serde(default)]
     run_wrapper: Option<ScriptId>,
+
+    /// The server wrapper script to run for tests.
+    #[serde(default)]
+    server_wrapper: Option<ScriptId>,
 }
 
 /// Deserialized form of setup script configuration before compilation.
@@ -710,6 +907,73 @@ pub struct WrapperScriptConfig {
     /// Defaults to ignoring the target runner.
     #[serde(default)]
     pub target_runner: WrapperScriptTargetRunner,
+}
+
+/// Deserialized form of server wrapper script configuration before compilation.
+///
+/// This is defined as a top-level element.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ServerWrapperConfig {
+    /// The command to run.
+    pub command: ScriptCommand,
+
+    /// The probe used to determine readiness.
+    pub probe: ServerWrapperProbeConfig,
+
+    /// An optional slow timeout for this command.
+    #[serde(
+        default,
+        deserialize_with = "crate::config::elements::deserialize_slow_timeout"
+    )]
+    pub slow_timeout: Option<SlowTimeout>,
+
+    /// An optional leak timeout for this command.
+    #[serde(
+        default,
+        deserialize_with = "crate::config::elements::deserialize_leak_timeout"
+    )]
+    pub leak_timeout: Option<LeakTimeout>,
+
+    /// Whether to capture standard output for this command.
+    #[serde(default = "default_true")]
+    pub capture_stdout: bool,
+
+    /// Whether to capture standard error for this command.
+    #[serde(default = "default_true")]
+    pub capture_stderr: bool,
+}
+
+impl ServerWrapperConfig {
+    /// Returns true if at least some output isn't being captured.
+    #[inline]
+    pub fn no_capture(&self) -> bool {
+        !(self.capture_stdout && self.capture_stderr)
+    }
+}
+
+/// Probe configuration for a server wrapper script.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ServerWrapperProbeConfig {
+    /// HTTP URL that should return a 2xx status when the server is ready.
+    pub url: String,
+
+    /// Polling interval.
+    #[serde(default = "default_server_wrapper_probe_interval", with = "humantime_serde")]
+    pub interval: Duration,
+
+    /// Maximum time to wait for readiness.
+    #[serde(default = "default_server_wrapper_probe_timeout", with = "humantime_serde")]
+    pub timeout: Duration,
+}
+
+fn default_server_wrapper_probe_interval() -> Duration {
+    Duration::from_millis(500)
+}
+
+fn default_server_wrapper_probe_timeout() -> Duration {
+    Duration::from_secs(60)
 }
 
 /// Interaction of wrapper script with a configured target runner.
@@ -1251,6 +1515,69 @@ mod tests {
                 .get("MODE"),
             Some("qux_mode"),
             "first script should be passed environment variable MODE with value qux_mode",
+        );
+    }
+
+    #[test]
+    fn test_server_wrappers_basic() {
+        let config_contents = indoc! {r#"
+            [scripts.server-wrapper.my-server]
+            command = "my-server-bin"
+            probe = { url = "http://127.0.0.1:8080/health", interval = "100ms", timeout = "3s" }
+
+            [[profile.default.scripts]]
+            filter = "test(server_test)"
+            server-wrapper = "my-server"
+        "#};
+
+        let workspace_dir = tempdir().unwrap();
+        let graph = temp_workspace(&workspace_dir, config_contents);
+        let pcx = ParseContext::new(&graph);
+
+        let nextest_config_error = NextestConfig::from_sources(
+            graph.workspace().root(),
+            &pcx,
+            None,
+            &[][..],
+            &Default::default(),
+        )
+        .unwrap_err();
+        match nextest_config_error.kind() {
+            ConfigParseErrorKind::ExperimentalFeaturesNotEnabled { missing_features } => {
+                assert_eq!(
+                    *missing_features,
+                    btreeset! { ConfigExperimental::ServerWrappers }
+                );
+            }
+            other => panic!("unexpected error kind: {other:?}"),
+        }
+
+        let nextest_config_result = NextestConfig::from_sources(
+            graph.workspace().root(),
+            &pcx,
+            None,
+            &[][..],
+            &btreeset! { ConfigExperimental::ServerWrappers },
+        )
+        .expect("config is valid");
+        let profile = nextest_config_result
+            .profile("default")
+            .expect("valid profile name")
+            .apply_build_platforms(&build_platforms());
+
+        let package_id = graph.workspace().iter().next().unwrap().id();
+        let host_binary_query =
+            binary_query(&graph, package_id, "lib", "my-binary", BuildPlatform::Host);
+        let test_name = TestCaseName::new("server_test");
+        let query = TestQuery {
+            binary_query: host_binary_query.to_query(),
+            test_name: &test_name,
+        };
+        let settings = profile.settings_for(crate::run_mode::NextestRunMode::Test, &query);
+        assert_eq!(
+            settings.server_wrapper_id().map(|id| id.as_str()),
+            Some("my-server"),
+            "server wrapper should be selected for matching tests",
         );
     }
 

@@ -1,7 +1,7 @@
 // Copyright (c) The nextest Contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use super::{DispatcherContext, ExecutorContext, RunnerTaskState};
+use super::{DispatcherContext, ExecutorContext, RunnerTaskState, ServerWrapperExecuteData};
 use crate::{
     config::{
         core::EvaluatableProfile,
@@ -29,8 +29,14 @@ use nextest_metadata::FilterMatch;
 use quick_junit::ReportUuid;
 use semver::Version;
 use std::{
-    collections::BTreeSet, convert::Infallible, fmt, num::NonZero, pin::Pin, str::FromStr,
-    sync::Arc, time::Duration,
+    collections::BTreeSet,
+    convert::Infallible,
+    fmt,
+    num::NonZero,
+    pin::Pin,
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
 };
 use tokio::{
     runtime::Runtime,
@@ -704,6 +710,28 @@ impl<'a> TestRunnerInner<'a> {
                 return;
             };
 
+            let (server_wrapper_tx, mut server_wrapper_rx) =
+                unbounded_channel::<ServerWrapperExecuteData<'a>>();
+            let server_wrapper_resp_tx = resp_tx.clone();
+            let run_server_wrappers_fut = async move {
+                let server_wrapper_data = executor_cx
+                    .run_server_wrappers(stress_index, server_wrapper_resp_tx)
+                    .await;
+                if server_wrapper_tx.send(server_wrapper_data).is_err() {
+                    debug!("server_wrapper_tx.send failed, shutting down");
+                }
+                RunnerTaskState::finished_no_children()
+            };
+            scope.spawn_cancellable(run_server_wrappers_fut, || RunnerTaskState::Cancelled);
+
+            let Some(server_wrapper_data) = server_wrapper_rx.blocking_recv() else {
+                debug!("no server wrapper data received, shutting down");
+                return;
+            };
+            let server_wrapper_data = Arc::new(server_wrapper_data);
+
+            let tests = self.test_list.to_priority_queue(self.profile);
+
             // groups is going to be passed to future_queue_grouped.
             let groups = self
                 .profile
@@ -714,8 +742,8 @@ impl<'a> TestRunnerInner<'a> {
             let setup_script_data = Arc::new(script_data);
 
             let filter_resp_tx = resp_tx.clone();
-
-            let tests = self.test_list.to_priority_queue(self.profile);
+            let server_wrapper_data_for_tests = server_wrapper_data.clone();
+            let server_wrapper_data_for_shutdown = server_wrapper_data.clone();
             let run_tests_fut = futures::stream::iter(tests)
                 .filter_map(move |test| {
                     // Filter tests before assigning a FutureQueueContext to
@@ -750,6 +778,7 @@ impl<'a> TestRunnerInner<'a> {
                     };
                     let resp_tx = resp_tx.clone();
                     let setup_script_data = setup_script_data.clone();
+                    let server_wrapper_data = server_wrapper_data_for_tests.clone();
 
                     let test_instance = test.instance;
 
@@ -782,6 +811,7 @@ impl<'a> TestRunnerInner<'a> {
                                         cx,
                                         resp_tx.clone(),
                                         setup_script_data,
+                                        server_wrapper_data,
                                     ))
                                 })
                             }
@@ -808,11 +838,10 @@ impl<'a> TestRunnerInner<'a> {
                 // Drop the None values.
                 .filter_map(std::future::ready)
                 .collect::<Vec<_>>()
-                // Interestingly, using a more idiomatic `async move {
-                // run_tests_fut.await ... }` block causes Rust 1.83 to complain
-                // about a weird lifetime mismatch. FutureExt::map as used below
-                // does not.
-                .map(|child_join_errors| RunnerTaskState::Finished { child_join_errors });
+                .map(move |child_join_errors| {
+                    server_wrapper_data_for_shutdown.shutdown_all();
+                    RunnerTaskState::Finished { child_join_errors }
+                });
 
             scope.spawn_cancellable(run_tests_fut, || RunnerTaskState::Cancelled);
         });

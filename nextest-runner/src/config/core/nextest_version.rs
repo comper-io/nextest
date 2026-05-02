@@ -224,6 +224,8 @@ impl<'de> Deserialize<'de> for ExperimentalDeserialize {
                     #[serde(default)]
                     wrapper_scripts: bool,
                     #[serde(default)]
+                    server_wrappers: bool,
+                    #[serde(default)]
                     benchmarks: bool,
                 }
 
@@ -236,6 +238,7 @@ impl<'de> Deserialize<'de> for ExperimentalDeserialize {
                 let TableConfig {
                     setup_scripts,
                     wrapper_scripts,
+                    server_wrappers,
                     benchmarks,
                 } = Deserialize::deserialize(ignored_de).map_err(serde::de::Error::custom)?;
 
@@ -245,6 +248,9 @@ impl<'de> Deserialize<'de> for ExperimentalDeserialize {
                 }
                 if wrapper_scripts {
                     known.insert(ConfigExperimental::WrapperScripts);
+                }
+                if server_wrappers {
+                    known.insert(ConfigExperimental::ServerWrappers);
                 }
                 if benchmarks {
                     known.insert(ConfigExperimental::Benchmarks);
@@ -411,6 +417,8 @@ pub enum ConfigExperimental {
     SetupScripts,
     /// Enable support for wrapper scripts.
     WrapperScripts,
+    /// Enable support for server wrapper scripts.
+    ServerWrappers,
     /// Enable support for benchmarks.
     Benchmarks,
 }
@@ -418,7 +426,13 @@ pub enum ConfigExperimental {
 impl ConfigExperimental {
     /// Returns an iterator over all known experimental features.
     pub fn known_features() -> impl Iterator<Item = Self> {
-        vec![Self::SetupScripts, Self::WrapperScripts, Self::Benchmarks].into_iter()
+        vec![
+            Self::SetupScripts,
+            Self::WrapperScripts,
+            Self::ServerWrappers,
+            Self::Benchmarks,
+        ]
+        .into_iter()
     }
 
     /// Returns the environment variable name for this feature, if any.
@@ -426,6 +440,7 @@ impl ConfigExperimental {
         match self {
             Self::SetupScripts => None,
             Self::WrapperScripts => None,
+            Self::ServerWrappers => None,
             Self::Benchmarks => Some("NEXTEST_EXPERIMENTAL_BENCHMARKS"),
         }
     }
@@ -451,6 +466,7 @@ impl FromStr for ConfigExperimental {
         match s {
             "setup-scripts" => Ok(Self::SetupScripts),
             "wrapper-scripts" => Ok(Self::WrapperScripts),
+            "server-wrappers" => Ok(Self::ServerWrappers),
             "benchmarks" => Ok(Self::Benchmarks),
             _ => Err(()),
         }
@@ -462,6 +478,7 @@ impl fmt::Display for ConfigExperimental {
         match self {
             Self::SetupScripts => write!(f, "setup-scripts"),
             Self::WrapperScripts => write!(f, "wrapper-scripts"),
+            Self::ServerWrappers => write!(f, "server-wrappers"),
             Self::Benchmarks => write!(f, "benchmarks"),
         }
     }

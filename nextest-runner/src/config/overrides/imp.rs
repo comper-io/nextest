@@ -11,7 +11,8 @@ use crate::{
             TestPriority, ThreadsRequired,
         },
         scripts::{
-            CompiledProfileScripts, DeserializedProfileScriptConfig, ScriptId, WrapperScriptConfig,
+            CompiledProfileScripts, DeserializedProfileScriptConfig, ScriptId,
+            ServerWrapperConfig, WrapperScriptConfig,
         },
     },
     errors::{
@@ -104,6 +105,7 @@ pub struct TestSettings<'p, Source = ()> {
     priority: (TestPriority, Source),
     threads_required: (ThreadsRequired, Source),
     run_wrapper: Option<(&'p WrapperScriptConfig, Source)>,
+    server_wrapper: Option<(ScriptId, &'p ServerWrapperConfig, Source)>,
     run_extra_args: (&'p [String], Source),
     retries: (RetryPolicy, Source),
     flaky_result: (FlakyResult, Source),
@@ -193,6 +195,16 @@ impl<'p> TestSettings<'p> {
         self.run_wrapper.map(|(script, _)| script)
     }
 
+    /// Returns the server wrapper script for this test.
+    pub fn server_wrapper(&self) -> Option<&'p ServerWrapperConfig> {
+        self.server_wrapper.as_ref().map(|(_, script, _)| *script)
+    }
+
+    /// Returns the server wrapper script ID for this test.
+    pub fn server_wrapper_id(&self) -> Option<&ScriptId> {
+        self.server_wrapper.as_ref().map(|(id, _, _)| id)
+    }
+
     /// Returns extra arguments to pass at runtime for this test.
     pub fn run_extra_args(&self) -> &'p [String] {
         self.run_extra_args.0
@@ -264,6 +276,7 @@ impl<'p, Source: Copy> TestSettings<'p, Source> {
         let mut priority = None;
         let mut threads_required = None;
         let mut run_wrapper = None;
+        let mut server_wrapper = None;
         let mut run_extra_args = None;
         let mut retries = None;
         let mut flaky_result = None;
@@ -364,6 +377,11 @@ impl<'p, Source: Copy> TestSettings<'p, Source> {
             {
                 run_wrapper = Some(Source::track_script(wrapper.clone(), override_));
             }
+            if server_wrapper.is_none()
+                && let Some(wrapper) = &override_.server_wrapper
+            {
+                server_wrapper = Some(Source::track_script(wrapper.clone(), override_));
+            }
         }
 
         // If no overrides were found, use the profile defaults.
@@ -371,6 +389,8 @@ impl<'p, Source: Copy> TestSettings<'p, Source> {
         let threads_required =
             threads_required.unwrap_or_else(|| Source::track_profile(profile.threads_required()));
         let run_wrapper = run_wrapper.map(|wrapper| map_wrapper_script(profile, wrapper));
+        let server_wrapper =
+            server_wrapper.map(|wrapper| map_server_wrapper_script(profile, wrapper));
         let run_extra_args =
             run_extra_args.unwrap_or_else(|| Source::track_profile(profile.run_extra_args()));
         let retries = retries.unwrap_or_else(|| Source::track_profile(profile.retries()));
@@ -405,6 +425,7 @@ impl<'p, Source: Copy> TestSettings<'p, Source> {
             threads_required,
             run_extra_args,
             run_wrapper,
+            server_wrapper,
             retries,
             flaky_result,
             priority,
@@ -463,6 +484,26 @@ where
             )
         });
     (wrapper_config, source)
+}
+
+fn map_server_wrapper_script<'p, Source>(
+    profile: &'p EvaluatableProfile<'_>,
+    (script, source): (ScriptId, Source),
+) -> (ScriptId, &'p ServerWrapperConfig, Source)
+where
+    Source: TrackSource<'p>,
+{
+    let wrapper_config = profile
+        .script_config()
+        .server_wrapper
+        .get(&script)
+        .unwrap_or_else(|| {
+            panic!(
+                "server wrapper script {script} not found \
+                 (should have been checked while reading config)"
+            )
+        });
+    (script, wrapper_config, source)
 }
 
 #[derive(Clone, Debug)]

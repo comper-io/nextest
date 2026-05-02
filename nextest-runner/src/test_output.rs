@@ -6,7 +6,10 @@ use crate::{
 };
 use bstr::{ByteSlice, Lines};
 use bytes::Bytes;
-use std::{borrow::Cow, sync::OnceLock};
+use std::{
+    borrow::Cow,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 /// The strategy used to capture test executable output
 #[derive(Copy, Clone, PartialEq, Default, Debug)]
@@ -27,6 +30,52 @@ pub enum CaptureStrategy {
     /// This mode is used when using --no-capture, causing nextest to execute
     /// tests serially without capturing output
     None,
+}
+
+/// A shared, append-only output buffer used by server wrappers.
+#[derive(Clone, Debug, Default)]
+pub struct ServerWrapperOutputBuffer {
+    inner: Arc<Mutex<Vec<u8>>>,
+}
+
+impl ServerWrapperOutputBuffer {
+    /// Creates a new server wrapper output buffer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the current offset in bytes.
+    pub fn current_offset(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("server wrapper output buffer lock poisoned")
+            .len()
+    }
+
+    /// Appends bytes to the buffer.
+    pub fn append(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.inner
+            .lock()
+            .expect("server wrapper output buffer lock poisoned")
+            .extend_from_slice(bytes);
+    }
+
+    /// Returns a copy of bytes between offsets.
+    pub fn slice(&self, start: usize, end: usize) -> Vec<u8> {
+        let guard = self
+            .inner
+            .lock()
+            .expect("server wrapper output buffer lock poisoned");
+        let start = start.min(guard.len());
+        let end = end.min(guard.len());
+        if start >= end {
+            return Vec::new();
+        }
+        guard[start..end].to_vec()
+    }
 }
 
 /// A single output for a test or setup script: standard output, standard error, or a combined

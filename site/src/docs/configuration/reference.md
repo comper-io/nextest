@@ -450,7 +450,8 @@ For detailed information, see [_Test groups for mutual exclusion_](test-groups.m
 
 <!-- md:version 0.9.59 -->
 
-Scripts are configured under `[scripts.setup.<name>]` and `[scripts.wrapper.<name>]` sections.
+Scripts are configured under `[scripts.setup.<name>]`,
+`[scripts.wrapper.<name>]`, and `[scripts.server-wrapper.<name>]` sections.
 
 ### Setup scripts
 
@@ -546,6 +547,56 @@ For detailed information, see [_Wrapper scripts_](wrapper-scripts.md).
 - **Valid values**: `"ignore"`, `"overrides-wrapper"`, `"within-wrapper"`, `"around-wrapper"`
 - **Default**: `"ignore"`
 
+### Server wrappers
+
+For detailed information, see [_Server wrappers_](server-wrappers.md).
+
+#### `scripts.server-wrapper.<name>.command`
+
+- **Type**: String, array, or object
+- **Description**: The command to execute for the long-lived server process
+
+#### `scripts.server-wrapper.<name>.probe.url`
+
+- **Type**: String
+- **Description**: HTTP URL that must return a 2xx status before tests start
+
+#### `scripts.server-wrapper.<name>.probe.interval`
+
+- **Type**: String (duration)
+- **Description**: How often to poll the probe URL
+- **Default**: `500ms`
+
+#### `scripts.server-wrapper.<name>.probe.timeout`
+
+- **Type**: String (duration)
+- **Description**: Maximum amount of time to wait for readiness
+- **Default**: `60s`
+
+#### `scripts.server-wrapper.<name>.slow-timeout`
+
+- **Type**: String (duration) or object
+- **Description**: Timeout configuration for server startup
+- **Default**: No timeout
+
+#### `scripts.server-wrapper.<name>.leak-timeout`
+
+- **Type**: String (duration) or object
+- **Description**: Leak timeout for the server wrapper process
+- **Default**: `200ms`
+
+#### `scripts.server-wrapper.<name>.capture-stdout`
+
+- **Type**: Boolean
+- **Description**: Whether to capture stdout from the server wrapper
+- **Default**: `true`
+
+#### `scripts.server-wrapper.<name>.capture-stderr`
+
+- **Type**: Boolean
+- **Description**: Whether to capture stderr from the server wrapper
+- **Default**: `true`
+
 ## Profile script configuration
 
 <!-- md:version 0.9.59 -->
@@ -606,6 +657,13 @@ At least one instruction must be specified.
 - **Description**: Wrapper script to use during test execution
 - **Documentation**: [_Wrapper scripts_](wrapper-scripts.md)
 - **Example**: `run-wrapper = "my-run-wrapper"`
+
+#### `server-wrapper`
+
+- **Type**: String
+- **Description**: Server wrapper script to run while matching tests execute
+- **Documentation**: [_Server wrappers_](server-wrappers.md)
+- **Example**: `server-wrapper = "my-server"`
 
 ## Default configuration
 
