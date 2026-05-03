@@ -25,6 +25,14 @@ Here, `priority` is an integer from -100 to 100, both inclusive. The default pri
 
 Tests with the same priority level are currently run in lexicographic order, and are sorted first by binary name and then by test name. This is not part of the [stability guarantees](../stability/index.md), though any change to this order will be made with care.
 
+### Shuffling within a priority level
+
+<!-- md:version 0.9.133 -->
+
+You can randomize the order of tests that share the same priority by setting `shuffle = true` in the profile, or by passing `--shuffle` (or setting `NEXTEST_SHUFFLE_TESTS`). Higher and lower priorities are unchanged: only the relative order among tests with equal priority is randomized.
+
+For a reproducible order, set `shuffle-seed` in the profile or pass `--shuffle-seed` (or set `NEXTEST_SHUFFLE_SEED`). If shuffling is enabled and no seed is configured, nextest picks a random seed for each run and logs it at info level so you can reproduce a run if needed.
+
 ## Suggestions for prioritizing tests
 
 Tests should be prioritized with care. Some factors to consider:

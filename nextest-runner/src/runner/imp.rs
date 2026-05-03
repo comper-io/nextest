@@ -14,7 +14,7 @@ use crate::{
         TestRunnerBuildError, TestRunnerExecuteErrors, TracerCommandParseError,
     },
     input::{InputHandler, InputHandlerKind, InputHandlerStatus},
-    list::{OwnedTestInstanceId, TestInstanceWithSettings, TestList},
+    list::{OwnedTestInstanceId, TestInstanceWithSettings, TestList, TestShuffleConfig},
     reporter::events::{ReporterEvent, RunStats, StressIndex},
     runner::ExecutorEvent,
     signal::{SignalHandler, SignalHandlerKind},
@@ -264,6 +264,8 @@ pub struct TestRunnerBuilder {
     flaky_result: Option<FlakyResult>,
     max_fail: Option<MaxFail>,
     test_threads: Option<TestThreads>,
+    shuffle: Option<bool>,
+    shuffle_seed: Option<u64>,
     stress_condition: Option<StressCondition>,
     interceptor: Interceptor,
     expected_outstanding: Option<BTreeSet<OwnedTestInstanceId>>,
@@ -307,6 +309,18 @@ impl TestRunnerBuilder {
     /// Sets the number of tests to run simultaneously.
     pub fn set_test_threads(&mut self, test_threads: TestThreads) -> &mut Self {
         self.test_threads = Some(test_threads);
+        self
+    }
+
+    /// Sets whether tests with the same priority are shuffled before execution.
+    pub fn set_shuffle(&mut self, shuffle: bool) -> &mut Self {
+        self.shuffle = Some(shuffle);
+        self
+    }
+
+    /// Sets the RNG seed used when shuffling tests with the same priority.
+    pub fn set_shuffle_seed(&mut self, shuffle_seed: u64) -> &mut Self {
+        self.shuffle_seed = Some(shuffle_seed);
         self
     }
 
@@ -362,6 +376,8 @@ impl TestRunnerBuilder {
         };
         let max_fail = self.max_fail.unwrap_or_else(|| profile.max_fail());
 
+        let shuffle = TestShuffleConfig::resolve(profile, self.shuffle, self.shuffle_seed);
+
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("nextest-runner-worker")
@@ -392,6 +408,7 @@ impl TestRunnerBuilder {
                 interceptor: self.interceptor,
                 expected_outstanding: self.expected_outstanding,
                 version_env_vars: self.version_env_vars,
+                shuffle,
                 runtime,
             },
             signal_handler,
@@ -563,6 +580,7 @@ struct TestRunnerInner<'a> {
     interceptor: Interceptor,
     expected_outstanding: Option<BTreeSet<OwnedTestInstanceId>>,
     version_env_vars: Option<VersionEnvVars>,
+    shuffle: TestShuffleConfig,
     runtime: Runtime,
 }
 
@@ -724,7 +742,7 @@ impl<'a> TestRunnerInner<'a> {
             };
             let server_wrapper_data = Arc::new(server_wrapper_data);
 
-            let tests = self.test_list.to_priority_queue(self.profile);
+            let tests = self.test_list.to_priority_queue(self.profile, self.shuffle);
 
             // groups is going to be passed to future_queue_grouped.
             let groups = self
@@ -947,6 +965,43 @@ mod tests {
             .unwrap();
         assert_eq!(runner.inner.capture_strategy, CaptureStrategy::None);
         assert_eq!(runner.inner.test_threads, 1, "tests run serially");
+        assert_eq!(
+            runner.inner.shuffle,
+            TestShuffleConfig {
+                shuffle: false,
+                seed: None,
+            },
+            "shuffle is disabled by default"
+        );
+    }
+
+    #[test]
+    fn shuffle_builder_overrides_profile() {
+        let mut builder = TestRunnerBuilder::default();
+        builder.set_shuffle(true).set_shuffle_seed(42);
+        let test_list = TestList::empty();
+        let config = NextestConfig::default_config("/fake/dir");
+        let profile = config.profile(NextestConfig::DEFAULT_PROFILE).unwrap();
+        let build_platforms = BuildPlatforms::new_with_no_target().unwrap();
+        let profile = profile.apply_build_platforms(&build_platforms);
+        let runner = builder
+            .build(
+                &test_list,
+                &profile,
+                vec![],
+                SignalHandlerKind::Noop,
+                InputHandlerKind::Noop,
+                DoubleSpawnInfo::disabled(),
+                TargetRunner::empty(),
+            )
+            .unwrap();
+        assert_eq!(
+            runner.inner.shuffle,
+            TestShuffleConfig {
+                shuffle: true,
+                seed: Some(42),
+            }
+        );
     }
 
     #[test]

@@ -150,6 +150,22 @@ pub struct TestRunnerOpts {
     )]
     test_threads: Option<TestThreads>,
 
+    /// Shuffle tests that share the same priority (see test-priorities documentation).
+    ///
+    /// Overrides `shuffle` in the profile. Implied when `--shuffle-seed` is set.
+    #[arg(
+        long,
+        env = "NEXTEST_SHUFFLE_TESTS",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = BoolishValueParser::new()
+    )]
+    shuffle: Option<bool>,
+
+    /// RNG seed for `--shuffle` (reproducible order within each priority level).
+    #[arg(long, env = "NEXTEST_SHUFFLE_SEED", value_name = "U64")]
+    shuffle_seed: Option<u64>,
+
     /// Number of retries for failing tests [default: from profile].
     #[arg(long, env = "NEXTEST_RETRIES", value_name = "N")]
     retries: Option<u32>,
@@ -225,6 +241,13 @@ impl TestRunnerOpts {
             warn!("ignoring --test-threads because {reasons}");
         }
 
+        if (self.shuffle.is_some() || self.shuffle_seed.is_some())
+            && let Some(reasons) =
+                no_run_no_capture_reasons(self.no_run, cap_strat == CaptureStrategy::None)
+        {
+            warn!("ignoring --shuffle and --shuffle-seed because {reasons}");
+        }
+
         if self.retries.is_some() && self.no_run {
             warn!("ignoring --retries because --no-run is specified");
         }
@@ -263,6 +286,13 @@ impl TestRunnerOpts {
 
         if let Some(test_threads) = self.test_threads {
             builder.set_test_threads(test_threads);
+        }
+
+        if let Some(shuffle) = self.shuffle {
+            builder.set_shuffle(shuffle);
+        }
+        if let Some(seed) = self.shuffle_seed {
+            builder.set_shuffle_seed(seed);
         }
 
         if let Some(condition) = self.stress.condition.as_ref() {

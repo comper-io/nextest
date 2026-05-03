@@ -19,6 +19,12 @@ Nextest reads some of its command-line options as environment variables. In all 
 `NEXTEST_TEST_THREADS`
 : Number of tests to run simultaneously
 
+`NEXTEST_SHUFFLE_TESTS` <!-- md:version 0.9.133 -->
+: If set to a [truthy](https://docs.rs/clap/latest/clap/builder/struct.BoolishValueParser.html) value, randomize the order of tests that share the same priority (see [_Test priorities_](test-priorities.md#shuffling-within-a-priority-level)). Overrides the profile `shuffle` setting.
+
+`NEXTEST_SHUFFLE_SEED` <!-- md:version 0.9.133 -->
+: Unsigned integer seed for shuffling. Setting this implies shuffling is enabled and overrides `shuffle-seed` from the profile. For the same seed and test list, the order within each priority level is reproducible.
+
 `NEXTEST_RETRIES`
 : Number of times to retry running tests
 

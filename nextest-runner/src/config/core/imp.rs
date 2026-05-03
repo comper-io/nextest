@@ -1159,6 +1159,27 @@ impl<'cfg> EvaluatableProfile<'cfg> {
         profile_field!(self.test_threads)
     }
 
+    /// Returns whether tests with the same priority are shuffled before execution.
+    pub fn shuffle(&self) -> bool {
+        self.custom_profile
+            .iter()
+            .chain(self.inheritance_chain.iter())
+            .find_map(|p| p.shuffle)
+            .unwrap_or(self.default_profile.shuffle)
+    }
+
+    /// Returns the shuffle seed from the profile chain, if any.
+    ///
+    /// When [`Self::shuffle`] is true and this is `None`, the runner chooses a random seed per
+    /// run and logs it at info level.
+    pub fn shuffle_seed(&self) -> Option<u64> {
+        self.custom_profile
+            .iter()
+            .chain(self.inheritance_chain.iter())
+            .find_map(|p| p.shuffle_seed)
+            .or(self.default_profile.shuffle_seed)
+    }
+
     /// Returns the number of threads required for each test.
     pub fn threads_required(&self) -> ThreadsRequired {
         profile_field!(self.threads_required)
@@ -1573,6 +1594,8 @@ struct StoreConfigImpl {
 pub(in crate::config) struct DefaultProfileImpl {
     default_filter: String,
     test_threads: TestThreads,
+    shuffle: bool,
+    shuffle_seed: Option<u64>,
     threads_required: ThreadsRequired,
     run_extra_args: Vec<String>,
     retries: RetryPolicy,
@@ -1602,6 +1625,8 @@ impl DefaultProfileImpl {
             test_threads: p
                 .test_threads
                 .expect("test-threads present in default profile"),
+            shuffle: p.shuffle.unwrap_or(false),
+            shuffle_seed: p.shuffle_seed,
             threads_required: p
                 .threads_required
                 .expect("threads-required present in default profile"),
@@ -1688,6 +1713,10 @@ pub(in crate::config) struct CustomProfileImpl {
     flaky_result: Option<FlakyResult>,
     #[serde(default)]
     test_threads: Option<TestThreads>,
+    #[serde(default)]
+    shuffle: Option<bool>,
+    #[serde(default)]
+    shuffle_seed: Option<u64>,
     #[serde(default)]
     threads_required: Option<ThreadsRequired>,
     #[serde(default)]
@@ -1918,6 +1947,52 @@ mod tests {
         default_config
             .profile(NextestConfig::DEFAULT_PROFILE)
             .expect("default profile should exist");
+    }
+
+    #[test]
+    fn shuffle_profile_options_parse() {
+        use crate::{config::core::ToolConfigFile, list::TestShuffleConfig};
+
+        let config_contents = r#"
+            [profile.default]
+            shuffle = true
+            shuffle-seed = 12345
+        "#;
+
+        let workspace_dir = tempdir().unwrap();
+        let graph = temp_workspace(&workspace_dir, config_contents);
+        let pcx = ParseContext::new(&graph);
+        const NO_TOOL_CONFIGS: &[ToolConfigFile] = &[];
+        let nextest_config = NextestConfig::from_sources(
+            graph.workspace().root(),
+            &pcx,
+            None,
+            NO_TOOL_CONFIGS,
+            &Default::default(),
+        )
+        .expect("config is valid");
+
+        let profile = nextest_config
+            .profile(NextestConfig::DEFAULT_PROFILE)
+            .expect("default profile");
+        let profile = profile.apply_build_platforms(&build_platforms());
+        assert!(profile.shuffle());
+        assert_eq!(profile.shuffle_seed(), Some(12345));
+        assert_eq!(
+            TestShuffleConfig::resolve(&profile, None, None),
+            TestShuffleConfig {
+                shuffle: true,
+                seed: Some(12345),
+            }
+        );
+        assert_eq!(
+            TestShuffleConfig::resolve(&profile, None, Some(7)),
+            TestShuffleConfig {
+                shuffle: true,
+                seed: Some(7),
+            },
+            "CLI shuffle seed overrides profile seed"
+        );
     }
 
     #[test]

@@ -41,6 +41,7 @@ use nextest_metadata::{
 };
 use owo_colors::OwoColorize;
 use quick_junit::ReportUuid;
+use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::{Borrow, Cow},
@@ -54,7 +55,7 @@ use std::{
 };
 use swrite::{SWrite, swrite};
 use tokio::runtime::Runtime;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// A Rust test binary built by Cargo. This artifact hasn't been run yet so there's no information
 /// about the tests within it.
@@ -692,8 +693,9 @@ impl<'g> TestList<'g> {
     pub fn to_priority_queue(
         &'g self,
         profile: &'g EvaluatableProfile<'g>,
+        shuffle: TestShuffleConfig,
     ) -> TestPriorityQueue<'g> {
-        TestPriorityQueue::new(self, profile)
+        TestPriorityQueue::new(self, profile, shuffle)
     }
 
     /// Outputs this list as a string with the given format.
@@ -1225,13 +1227,39 @@ impl<'g> ListProfile for EvaluatableProfile<'g> {
     }
 }
 
+/// Resolved shuffle behavior for [`TestList::to_priority_queue`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestShuffleConfig {
+    /// Whether to shuffle each block of tests that share the same priority.
+    pub shuffle: bool,
+    /// RNG seed for shuffling, or `None` to choose a random seed per run.
+    pub seed: Option<u64>,
+}
+
+impl TestShuffleConfig {
+    /// Resolves shuffle settings from a profile and optional CLI overrides.
+    pub fn resolve(
+        profile: &EvaluatableProfile<'_>,
+        shuffle_cli: Option<bool>,
+        seed_cli: Option<u64>,
+    ) -> Self {
+        let shuffle = shuffle_cli.unwrap_or(profile.shuffle()) || seed_cli.is_some();
+        let seed = seed_cli.or(profile.shuffle_seed());
+        Self { shuffle, seed }
+    }
+}
+
 /// A test list that has been sorted and has had priorities applied to it.
 pub struct TestPriorityQueue<'a> {
     tests: Vec<TestInstanceWithSettings<'a>>,
 }
 
 impl<'a> TestPriorityQueue<'a> {
-    fn new(test_list: &'a TestList<'a>, profile: &'a EvaluatableProfile<'a>) -> Self {
+    fn new(
+        test_list: &'a TestList<'a>,
+        profile: &'a EvaluatableProfile<'a>,
+        shuffle: TestShuffleConfig,
+    ) -> Self {
         let mode = test_list.mode();
         let mut tests = test_list
             .iter_tests()
@@ -1243,6 +1271,31 @@ impl<'a> TestPriorityQueue<'a> {
         // Note: this is a stable sort so that tests with the same priority are
         // sorted by what `iter_tests` produced.
         tests.sort_by_key(|test| test.settings.priority());
+
+        if shuffle.shuffle {
+            let mut rng = match shuffle.seed {
+                Some(seed) => StdRng::seed_from_u64(seed),
+                None => {
+                    let seed = rand::rng().random::<u64>();
+                    info!(
+                        shuffle_seed = seed,
+                        "shuffling tests within each priority level (no shuffle-seed configured; set shuffle-seed for reproducible order)"
+                    );
+                    StdRng::seed_from_u64(seed)
+                }
+            };
+
+            let mut start = 0usize;
+            while start < tests.len() {
+                let priority = tests[start].settings.priority();
+                let mut end = start + 1;
+                while end < tests.len() && tests[end].settings.priority() == priority {
+                    end += 1;
+                }
+                tests[start..end].shuffle(&mut rng);
+                start = end;
+            }
+        }
 
         Self { tests }
     }

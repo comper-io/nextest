@@ -28,6 +28,14 @@ flaky-result = "pass"
 # the string "num-cpus". Can be overridden through the `--test-threads` option.
 test-threads = "num-cpus"
 
+# If true, randomize the order of tests that share the same priority (see
+# https://nexte.st/docs/configuration/test-priorities/). Can be overridden through
+# `--shuffle` and `--shuffle-seed`.
+shuffle = false
+
+# If `shuffle` is true, set `shuffle-seed` to a fixed integer for reproducible ordering.
+# shuffle-seed = 12345
+
 # The number of threads required for each test. This is generally used in overrides to
 # mark certain tests as heavier than others. However, it can also be set as a global parameter.
 threads-required = 1

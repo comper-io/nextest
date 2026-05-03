@@ -109,6 +109,20 @@ Profiles are configured under `[profile.<name>]`. The default profile is called 
 - **Default**: `"num-cpus"`
 - **Example**: `test-threads = 4` or `test-threads = "num-cpus"`
 
+#### `profile.<name>.shuffle` <!-- md:version 0.9.133 -->
+
+- **Type**: Boolean
+- **Description**: If true, randomize the order of tests that share the same priority (see [_Test priorities_](test-priorities.md#shuffling-within-a-priority-level))
+- **Default**: `false`
+- **Overridden by**: `--shuffle` and `NEXTEST_SHUFFLE_TESTS`
+
+#### `profile.<name>.shuffle-seed` <!-- md:version 0.9.133 -->
+
+- **Type**: Integer (`u64`)
+- **Description**: RNG seed for shuffling within each priority level. If `shuffle` is true and this is unset, nextest uses a random seed per run and logs it at info level.
+- **Default**: none
+- **Overridden by**: `--shuffle-seed` and `NEXTEST_SHUFFLE_SEED`
+
 #### `profile.<name>.threads-required`
 
 - **Type**: Integer or string
