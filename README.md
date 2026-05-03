@@ -1,5 +1,19 @@
 # Nextest
 
+## Fork Notice
+
+This is a fork of nextest which allows a group of tests to share a "server wrapper".
+
+Basically a combination of a setup script and wrapper, which is useful if you're testing against a server and don't want to spin that up for every integration test.
+
+We've built it at @comper-io so that we can spawn a server process that remains active as long as the client tests are being fired off. This allows us to stress test the server process and run all of our integration tests within about 50 seconds on a 16 core machine, of course at the cost of isolation between tests.
+
+We like speed.
+
+This is just for our own purposes and highly experimental. It's "weird" so we don't expect it to be upstreamed. Feel free to take inspiration from it. 
+
+## Rest of Readme
+
 Nextest is a next-generation test runner for Rust. For more information, **check out [the website](https://nexte.st/)**.
 
 This repository contains the source code for:
