@@ -647,6 +647,7 @@ impl TerminalProgress {
             | TestEventKind::ServerWrapperStarted { .. }
             | TestEventKind::ServerWrapperWaitingForProbe { .. }
             | TestEventKind::ServerWrapperReady { .. }
+            | TestEventKind::ServerWrapperExitedBeforeReady { .. }
             | TestEventKind::ServerWrapperStopping { .. } => TerminalProgressValue::None,
             TestEventKind::RunBeginCancel { current_stats, .. }
             | TestEventKind::RunBeginKill { current_stats, .. } => {

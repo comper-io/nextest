@@ -656,6 +656,7 @@ impl TestEventKindSummary<LiveSpec> {
             | TestEventKind::ServerWrapperStarted { .. }
             | TestEventKind::ServerWrapperWaitingForProbe { .. }
             | TestEventKind::ServerWrapperReady { .. }
+            | TestEventKind::ServerWrapperExitedBeforeReady { .. }
             | TestEventKind::ServerWrapperStopping { .. } => return None,
         })
     }

@@ -229,6 +229,30 @@ pub enum TestEventKind<'a> {
         program: String,
     },
 
+    /// The server wrapper process exited before the readiness probe succeeded.
+    ServerWrapperExitedBeforeReady {
+        /// The script ID.
+        script_id: ScriptId,
+
+        /// The program to run.
+        program: String,
+
+        /// Exit status of the server wrapper process.
+        exit_status: ExitStatus,
+
+        /// Captured stdout bytes (empty if `capture-stdout` was false).
+        stdout: Vec<u8>,
+
+        /// Captured stderr bytes (empty if `capture-stderr` was false).
+        stderr: Vec<u8>,
+
+        /// Whether stdout was captured from the process.
+        capture_stdout: bool,
+
+        /// Whether stderr was captured from the process.
+        capture_stderr: bool,
+    },
+
     // TODO: add events for BinaryStarted and BinaryFinished? May want a slightly different way to
     // do things, maybe a couple of reporter traits (one for the run as a whole and one for each
     // binary).

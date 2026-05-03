@@ -75,6 +75,13 @@ use tokio::{
 };
 use tracing::{debug, instrument};
 
+/// Outcome of waiting for an HTTP probe while the server wrapper process is running.
+enum ProbeWaitOutcome {
+    Ready(Duration),
+    TimedOut,
+    ChildExited(ExitStatus),
+}
+
 #[derive(Debug)]
 pub(super) struct ExecutorContext<'a> {
     run_id: ReportUuid,
@@ -412,20 +419,44 @@ impl<'a> ExecutorContext<'a> {
             elapsed: Duration::ZERO,
         });
 
-        if let Some(elapsed) = self.wait_for_probe(packet.config).await {
-            let _ = resp_tx.send(ExecutorEvent::ServerWrapperReady {
-                stress_index: packet.stress_index,
-                script_id: packet.script_id.clone(),
-                program: packet.program.clone(),
-                elapsed,
-            });
-        } else {
-            let _ = resp_tx.send(ExecutorEvent::ServerWrapperSlow {
-                stress_index: packet.stress_index,
-                script_id: packet.script_id.clone(),
-                program: packet.program.clone(),
-                elapsed: packet.config.probe.timeout,
-            });
+        match self
+            .wait_for_probe_or_child_exit(&mut child, packet.config)
+            .await
+        {
+            ProbeWaitOutcome::Ready(elapsed) => {
+                let _ = resp_tx.send(ExecutorEvent::ServerWrapperReady {
+                    stress_index: packet.stress_index,
+                    script_id: packet.script_id.clone(),
+                    program: packet.program.clone(),
+                    elapsed,
+                });
+            }
+            ProbeWaitOutcome::TimedOut => {
+                let _ = resp_tx.send(ExecutorEvent::ServerWrapperSlow {
+                    stress_index: packet.stress_index,
+                    script_id: packet.script_id.clone(),
+                    program: packet.program.clone(),
+                    elapsed: packet.config.probe.timeout,
+                });
+            }
+            ProbeWaitOutcome::ChildExited(exit_status) => {
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                let start = ServerWrapperOutputOffsets::default();
+                let end = output_buffer.current_offsets();
+                let slice = output_buffer.slice(start, end);
+                let _ = resp_tx.send(ExecutorEvent::ServerWrapperExitedBeforeReady {
+                    stress_index: packet.stress_index,
+                    script_id: packet.script_id.clone(),
+                    program: packet.program.clone(),
+                    exit_status,
+                    stdout: slice.stdout,
+                    stderr: slice.stderr,
+                    capture_stdout: packet.config.capture_stdout,
+                    capture_stderr: packet.config.capture_stderr,
+                });
+                return None;
+            }
         }
 
         Some(Arc::new(ServerWrapperHandle {
@@ -443,17 +474,35 @@ impl<'a> ExecutorContext<'a> {
         }))
     }
 
-    async fn wait_for_probe(&self, config: &ServerWrapperConfig) -> Option<Duration> {
+    async fn wait_for_probe_or_child_exit(
+        &self,
+        child: &mut Child,
+        config: &ServerWrapperConfig,
+    ) -> ProbeWaitOutcome {
         let start = tokio::time::Instant::now();
-        let deadline = tokio::time::Instant::now() + config.probe.timeout;
+        let deadline = start + config.probe.timeout;
+
         loop {
             if self.check_http_probe(&config.probe.url).await {
-                return Some(start.elapsed());
+                return ProbeWaitOutcome::Ready(start.elapsed());
             }
-            if tokio::time::Instant::now() >= deadline {
-                return None;
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return ProbeWaitOutcome::TimedOut;
             }
-            tokio::time::sleep(config.probe.interval).await;
+
+            let remaining = deadline.duration_since(now);
+            let sleep_dur = config.probe.interval.min(remaining);
+
+            tokio::select! {
+                wait_result = child.wait() => {
+                    let status = wait_result
+                        .expect("waiting on server wrapper process should not fail");
+                    return ProbeWaitOutcome::ChildExited(status);
+                }
+                _ = tokio::time::sleep(sleep_dur) => {}
+            }
         }
     }
 

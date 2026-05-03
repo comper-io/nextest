@@ -42,8 +42,10 @@ use crate::{
     },
     run_mode::NextestRunMode,
     runner::StressCount,
+    test_output::{ChildExecutionOutput, ChildOutput, ChildSingleOutput, ChildSplitOutput},
     write_str::WriteStr,
 };
+use bytes::Bytes;
 use debug_ignore::DebugIgnore;
 use nextest_metadata::MismatchReason;
 use owo_colors::OwoColorize;
@@ -834,6 +836,51 @@ impl<'a> DisplayReporterImpl<'a> {
                     "SERVER".style(self.styles.skip),
                     script_id.style(self.styles.script_id),
                     program,
+                )?;
+            }
+            TestEventKind::ServerWrapperExitedBeforeReady {
+                script_id,
+                program,
+                exit_status,
+                stdout,
+                stderr,
+                capture_stdout,
+                capture_stderr,
+            } => {
+                writeln!(
+                    writer,
+                    "{:>12} server_wrapper {} ({}) exited with {} before the readiness probe succeeded",
+                    "SERVER".style(self.styles.fail),
+                    script_id.style(self.styles.script_id),
+                    program,
+                    exit_status,
+                )?;
+
+                let failure_status = FailureStatus::extract(exit_status.clone());
+                let exec_output = ChildExecutionOutput::Output {
+                    result: Some(ExecutionResult::Fail {
+                        failure_status,
+                        leaked: false,
+                    }),
+                    output: ChildOutput::Split(ChildSplitOutput {
+                        stdout: (*capture_stdout)
+                            .then(|| ChildSingleOutput::from(Bytes::from(stdout.clone()))),
+                        stderr: (*capture_stderr)
+                            .then(|| ChildSingleOutput::from(Bytes::from(stderr.clone()))),
+                    }),
+                    errors: None,
+                };
+                let desc: ChildExecutionOutputDescription<LiveSpec> = exec_output.into();
+                let result_desc = ExecutionResultDescription::Fail {
+                    failure: failure_status.into(),
+                    leaked: false,
+                };
+                let spec = self.output_spec_for_finished(&result_desc, false);
+                self.unit_output.write_child_execution_output(
+                    &self.styles,
+                    &spec,
+                    &desc,
+                    writer,
                 )?;
             }
             TestEventKind::TestStarted {

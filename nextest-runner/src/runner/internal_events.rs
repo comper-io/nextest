@@ -30,7 +30,7 @@ use crate::{
     time::StopwatchSnapshot,
 };
 use nextest_metadata::MismatchReason;
-use std::time::Duration;
+use std::{process::ExitStatus, time::Duration};
 use tokio::{
     sync::{
         mpsc::{UnboundedReceiver, UnboundedSender},
@@ -92,6 +92,17 @@ pub(super) enum ExecutorEvent<'a> {
         script_id: ScriptId,
         program: String,
         elapsed: Duration,
+    },
+    ServerWrapperExitedBeforeReady {
+        #[expect(dead_code, reason = "kept for future progress reporting")]
+        stress_index: Option<StressIndex>,
+        script_id: ScriptId,
+        program: String,
+        exit_status: ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        capture_stdout: bool,
+        capture_stderr: bool,
     },
     ServerWrapperStopping {
         #[expect(dead_code, reason = "kept for future progress reporting")]

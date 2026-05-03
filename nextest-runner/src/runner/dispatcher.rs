@@ -689,6 +689,27 @@ where
                     program,
                 })
             }
+            InternalEvent::Executor(ExecutorEvent::ServerWrapperExitedBeforeReady {
+                script_id,
+                program,
+                exit_status,
+                stdout,
+                stderr,
+                capture_stdout,
+                capture_stderr,
+                ..
+            }) => {
+                debug!(%script_id, %program, ?exit_status, "server wrapper exited before probe succeeded");
+                self.callback_none_response(TestEventKind::ServerWrapperExitedBeforeReady {
+                    script_id,
+                    program,
+                    exit_status,
+                    stdout,
+                    stderr,
+                    capture_stdout,
+                    capture_stderr,
+                })
+            }
             InternalEvent::Executor(ExecutorEvent::ServerWrapperStopping {
                 script_id,
                 program,
