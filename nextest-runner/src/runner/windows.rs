@@ -62,6 +62,16 @@ pub(super) fn set_process_group(_cmd: &mut std::process::Command) {
     // TODO: set process group on Windows for better ctrl-C handling.
 }
 
+pub(super) fn begin_graceful_shutdown(_child: &Child, _child_pid: ChildPid) {
+    // Windows doesn't have a general-purpose graceful signal for arbitrary child
+    // processes in this codepath. Rely on the grace wait to let wrappers exit on
+    // their own before force termination.
+}
+
+pub(super) fn force_shutdown(child: &mut Child, _child_pid: ChildPid) {
+    let _ = child.start_kill();
+}
+
 pub(super) fn assign_process_to_job(
     child: &tokio::process::Child,
     job: Option<&Job>,

@@ -62,6 +62,22 @@ pub(super) fn job_control_child(child: &Child, child_pid: ChildPid, event: JobCo
     }
 }
 
+pub(super) fn begin_graceful_shutdown(child: &Child, child_pid: ChildPid) {
+    if child.id().is_some() {
+        unsafe {
+            libc::kill(child_pid.for_kill(), SIGTERM);
+        }
+    }
+}
+
+pub(super) fn force_shutdown(child: &mut Child, child_pid: ChildPid) {
+    if child.id().is_some() {
+        unsafe {
+            libc::kill(child_pid.for_kill(), SIGKILL);
+        }
+    }
+}
+
 // Note this is SIGSTOP rather than SIGTSTP to avoid triggering our signal handler.
 pub(super) fn raise_stop() {
     // This can never error out because SIGSTOP is a valid signal.

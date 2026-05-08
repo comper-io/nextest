@@ -59,7 +59,7 @@ use std::{
     pin::Pin,
     process::{ExitStatus, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -81,6 +81,8 @@ enum ProbeWaitOutcome {
     TimedOut,
     ChildExited(ExitStatus),
 }
+
+const SERVER_WRAPPER_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub(super) struct ExecutorContext<'a> {
@@ -132,9 +134,10 @@ pub(super) struct ServerWrapperHandle<'a> {
     stress_index: Option<StressIndex>,
     resp_tx: UnboundedSender<ExecutorEvent<'a>>,
     shutdown_sent: AtomicBool,
+    shutdown_grace_period: Duration,
     output_buffer: ServerWrapperOutputBuffer,
     remaining_tests: AtomicUsize,
-    child: std::sync::Mutex<Child>,
+    child: Arc<Mutex<Child>>,
     _stdout_task: JoinHandle<()>,
     _stderr_task: JoinHandle<()>,
     _marker: std::marker::PhantomData<&'a ServerWrapperConfig>,
@@ -169,16 +172,65 @@ impl<'a> ServerWrapperHandle<'a> {
     }
 
     fn request_shutdown(&self) {
-        if !self.shutdown_sent.swap(true, Ordering::AcqRel) {
-            let _ = self.resp_tx.send(ExecutorEvent::ServerWrapperStopping {
-                stress_index: self.stress_index,
-                script_id: self.script_id.clone(),
-                program: self.program.clone(),
-            });
+        if self.shutdown_sent.swap(true, Ordering::AcqRel) {
+            return;
         }
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.start_kill();
+        let _ = self.resp_tx.send(ExecutorEvent::ServerWrapperStopping {
+            stress_index: self.stress_index,
+            script_id: self.script_id.clone(),
+            program: self.program.clone(),
+        });
+
+        let child_pid_for_kill = match self.child.lock() {
+            Ok(child) => {
+                let Some(pid) = child.id() else {
+                    return;
+                };
+                #[cfg(unix)]
+                let child_pid_for_kill = ChildPid::ProcessGroup(pid);
+                #[cfg(not(unix))]
+                let child_pid_for_kill = ChildPid::Process(pid);
+                super::os::begin_graceful_shutdown(&child, child_pid_for_kill);
+                child_pid_for_kill
+            }
+            Err(_) => return,
+        };
+
+        if self.shutdown_grace_period.is_zero() {
+            if let Ok(mut child) = self.child.lock() {
+                super::os::force_shutdown(&mut child, child_pid_for_kill);
+            }
+            return;
         }
+
+        let child = self.child.clone();
+        let grace_period = self.shutdown_grace_period;
+        tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
+            loop {
+                let done = match child.lock() {
+                    Ok(mut child) => match child.try_wait() {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(_) => true,
+                    },
+                    Err(_) => true,
+                };
+                if done {
+                    return;
+                }
+
+                if started.elapsed() >= grace_period {
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+
+            if let Ok(mut child) = child.lock() {
+                super::os::force_shutdown(&mut child, child_pid_for_kill);
+            }
+        });
     }
 }
 
@@ -465,9 +517,10 @@ impl<'a> ExecutorContext<'a> {
             stress_index: packet.stress_index,
             resp_tx: resp_tx.clone(),
             shutdown_sent: AtomicBool::new(false),
+            shutdown_grace_period: SERVER_WRAPPER_SHUTDOWN_GRACE_PERIOD,
             output_buffer,
             remaining_tests: AtomicUsize::new(test_count),
-            child: std::sync::Mutex::new(child),
+            child: Arc::new(Mutex::new(child)),
             _stdout_task: stdout_task,
             _stderr_task: stderr_task,
             _marker: std::marker::PhantomData,
